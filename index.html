@@ -1,0 +1,1208 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IO Fill Rate — pod-wise short supply</title>
+<style>
+:root{
+  --plane:#f9f9f7; --surface-1:#fcfcfb;
+  --text-primary:#0b0b0b; --text-secondary:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --baseline:#c3c2b7; --border:rgba(11,11,11,0.10);
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
+  --good:#0ca30c; --warning:#fab219; --critical:#d03b3b;
+  --seq-2:#9ec5f4; --seq-4:#3987e5; --seq-6:#184f95;
+  --ghost:rgba(11,11,11,0.045);
+}
+@media (prefers-color-scheme: dark){ :root:where(:not([data-theme="light"])){
+  --plane:#0d0d0d; --surface-1:#1a1a19;
+  --text-primary:#ffffff; --text-secondary:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --baseline:#383835; --border:rgba(255,255,255,0.10);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+  --seq-2:#184f95; --seq-4:#3987e5; --seq-6:#9ec5f4;
+  --ghost:rgba(255,255,255,0.06);
+}}
+:root[data-theme="dark"]{
+  --plane:#0d0d0d; --surface-1:#1a1a19;
+  --text-primary:#ffffff; --text-secondary:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --baseline:#383835; --border:rgba(255,255,255,0.10);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+  --seq-2:#184f95; --seq-4:#3987e5; --seq-6:#9ec5f4;
+  --ghost:rgba(255,255,255,0.06);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--text-primary);
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:14px;line-height:1.45}
+.wrap{max-width:1180px;margin:0 auto;padding:24px 20px 64px}
+header.top{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;justify-content:space-between}
+h1{font-size:21px;margin:0 0 2px;letter-spacing:-0.01em}
+.sub{color:var(--text-secondary);font-size:12.5px;margin:0}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:16px 0 0;
+  background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:10px 12px;
+  position:sticky;top:0;z-index:20}
+.bar .lab{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-right:2px}
+.bar .sep{width:1px;height:22px;background:var(--grid);margin:0 4px}
+button.ctl,select.ctl{font:inherit;font-size:13px;padding:6px 11px;border-radius:8px;cursor:pointer;
+  background:var(--plane);color:var(--text-primary);border:1px solid var(--border)}
+button.ctl[aria-pressed="true"]{background:var(--text-primary);color:var(--surface-1);border-color:var(--text-primary)}
+button.ctl:hover:not([aria-pressed="true"]){background:var(--ghost)}
+section{background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:20px;margin-top:16px}
+h2{font-size:15px;margin:0 0 3px;letter-spacing:-0.005em}
+.note{color:var(--text-secondary);font-size:12.5px;margin:0 0 15px;max-width:80ch}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(166px,1fr));gap:12px}
+.tile{border:1px solid var(--border);border-radius:11px;padding:13px 14px}
+.tile .lab{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:6px}
+.tile .val{font-size:25px;font-weight:600;letter-spacing:-0.02em;line-height:1.05}
+.tile .foot{font-size:12px;color:var(--text-secondary);margin-top:5px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;
+  padding:2px 8px;border-radius:999px;border:1px solid var(--border);white-space:nowrap}
+.chip svg{width:11px;height:11px;flex:none}
+.city-h{display:flex;align-items:center;gap:9px;margin:20px 0 10px;font-size:13px;font-weight:650;color:var(--text-secondary)}
+.city-h:first-child{margin-top:2px}
+.city-h .rule{flex:1;height:1px;background:var(--grid)}
+.legend{display:flex;gap:15px;flex-wrap:wrap;margin:0 0 12px;font-size:12.5px;color:var(--text-secondary)}
+.legend .k{display:inline-flex;align-items:center;gap:6px}
+.sw{width:10px;height:10px;border-radius:3px;flex:none}
+.stack{display:flex;height:28px;border-radius:4px;gap:2px}
+.stackrow{margin-bottom:8px}
+.stacklab{display:flex;justify-content:space-between;font-size:12px;color:var(--text-secondary);margin-bottom:5px}
+.bars{display:flex;flex-direction:column;gap:3px}
+.brow{display:grid;grid-template-columns:118px 1fr 156px;gap:10px;align-items:center;padding:2px 4px;border-radius:6px;cursor:pointer}
+.brow:hover{background:var(--ghost)}
+.brow.sel{background:var(--ghost);outline:1px solid var(--border)}
+.bname{font-size:12px;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btrack{height:15px}
+.bfill{height:15px;border-radius:0 4px 4px 0;background:var(--s1)}
+.bmeta{font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.bmeta b{color:var(--text-primary);font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
+  font-weight:600;padding:7px 8px;border-bottom:1px solid var(--grid);white-space:nowrap}
+td{padding:7px 8px;border-bottom:1px solid var(--grid);vertical-align:middle}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.itemrow{cursor:pointer}
+tr.itemrow:hover>td{background:var(--ghost)}
+tr.podrow td{font-size:12.5px;color:var(--text-secondary);background:var(--ghost)}
+tr.podrow td:first-child{padding-left:26px}
+.mini{display:inline-flex;gap:1.5px;align-items:flex-end;height:14px}
+.mini i{width:3px;background:var(--s1);border-radius:1px 1px 0 0;display:block}
+.mini i.z{background:var(--critical)}
+.pill{font-size:11px;padding:1.5px 7px;border-radius:999px;border:1px solid var(--border);color:var(--text-secondary);white-space:nowrap}
+.tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+input[type=search]{font:inherit;font-size:13px;padding:6px 10px;border-radius:8px;
+  border:1px solid var(--border);background:var(--plane);color:var(--text-primary);min-width:190px}
+.funnel{display:flex;flex-direction:column;gap:8px;max-width:620px}
+.fstep{display:grid;grid-template-columns:74px 1fr;gap:10px;align-items:center}
+.flab{font-size:12px;color:var(--text-secondary)}
+.ffill{height:25px;border-radius:0 4px 4px 0;display:flex;align-items:center;padding-left:9px;
+  font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums}
+.tip{position:fixed;pointer-events:none;z-index:60;background:var(--text-primary);color:var(--surface-1);
+  font-size:12px;padding:7px 9px;border-radius:7px;opacity:0;transition:opacity .09s;max-width:300px;
+  box-shadow:0 4px 14px rgba(0,0,0,.18);font-variant-numeric:tabular-nums}
+.foothint{font-size:12px;color:var(--muted);margin-top:12px}
+.kv{display:flex;gap:5px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap}
+.drill{margin-top:14px;border-top:1px solid var(--grid);padding-top:14px}
+.drill h3{font-size:13px;margin:0 0 8px}
+.chartbox{width:100%}
+svg text{font-family:inherit}
+.catgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}
+.catcard{border:1px solid var(--border);border-radius:11px;padding:12px 13px;cursor:pointer}
+.catcard:hover{background:var(--ghost)}
+.catcard .cn{font-size:13px;font-weight:600;margin-bottom:2px}
+.catcard .cf{font-size:20px;font-weight:600;letter-spacing:-0.02em}
+.catcard .cd{font-size:12px;color:var(--text-secondary);margin-top:3px}
+.meter{height:6px;border-radius:3px;background:var(--grid);margin-top:8px;overflow:hidden}
+.meter i{display:block;height:6px;border-radius:3px}
+@media(max-width:640px){ .brow{grid-template-columns:92px 1fr 126px} .tile .val{font-size:21px} }
+
+/* ---------- data panel ---------- */
+section.ingest{border-style:solid}
+section.ingest.busy{opacity:.6;pointer-events:none}
+.drop{border:1.5px dashed var(--baseline);border-radius:12px;padding:26px 18px;text-align:center;
+  cursor:pointer;display:flex;flex-direction:column;gap:4px;transition:background .12s,border-color .12s}
+.drop:hover,.drop.over{border-color:var(--s1);background:var(--ghost)}
+.drop:focus-visible{outline:2px solid var(--s1);outline-offset:2px}
+.drop b{font-size:14px}
+.drop span{font-size:12.5px;color:var(--text-secondary)}
+.ingest-msg{font-size:12.5px;color:var(--text-secondary);margin:11px 0 0;min-height:1.2em}
+.ingest-msg.ok{color:var(--good)}
+.ingest-msg.bad{color:var(--critical)}
+.statrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.statrow .stat{border:1px solid var(--border);border-radius:10px;padding:9px 13px;min-width:132px}
+.statrow .stat .lab{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.statrow .stat b{font-size:19px;font-weight:600;letter-spacing:-0.02em;font-variant-numeric:tabular-nums}
+.fold{margin-top:12px;border-top:1px solid var(--grid);padding-top:10px}
+.fold>summary{cursor:pointer;font-size:13px;font-weight:600;list-style:none}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary::before{content:'+ ';color:var(--muted)}
+.fold[open]>summary::before{content:'– '}
+.filelist{font-size:12px;color:var(--text-secondary);white-space:pre-wrap;margin:9px 0 0;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+#rulesBox{width:100%;min-height:290px;margin-top:9px;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+  padding:11px 12px;border-radius:10px;border:1px solid var(--border);
+  background:var(--plane);color:var(--text-primary);resize:vertical}
+label.filelabel{display:inline-flex;align-items:center}
+body.nodata .bar,body.nodata section:not(.ingest),body.nodata .foothint{display:none}
+</style>
+</head>
+<body class="nodata">
+<div class="wrap">
+<header class="top">
+  <div>
+    <h1>IO Fill Rate — pod-wise short supply</h1>
+    <p class="sub">Ordered → Sent → Received by pod, item and category · BLR &amp; Delhi-NCR (GGN+NOI+DEL) · load your own CSV exports · history is kept in this browser</p>
+  </div>
+  <button class="ctl" id="themeBtn" aria-pressed="false">Dark</button>
+</header>
+
+<section class="ingest" id="ingestPanel">
+  <h2>Data</h2>
+  <p class="note">Drop the daily <b>Internal Order Products By Line Entry</b> exports here — one file or several at once, BLR and Delhi-NCR together. Lines are matched on Product Line Entry ID, so re-uploading an overlapping export updates rather than double counts, and the day-wise trend grows every time you add a file. Everything stays in this browser.</p>
+  <div class="drop" id="dropZone" tabindex="0" role="button" aria-label="Choose CSV files">
+    <b>Drop CSV files here</b>
+    <span>or click to choose</span>
+  </div>
+  <input type="file" id="filePicker" accept=".csv,text/csv" multiple hidden>
+  <p class="ingest-msg" id="ingestMsg"></p>
+  <div class="statrow">
+    <div class="stat"><span class="lab">Lines stored</span><b id="statLines">0</b></div>
+    <div class="stat"><span class="lab">Business days</span><b id="statDays">0</b></div>
+  </div>
+  <details class="fold"><summary>Duplicate indents</summary>
+    <p class="note" style="margin-top:9px">Reference-number pairs that ordered the same item, pod, quantity and day. If one of them is a mistake, add it to <code>excludeReferenceNumbers</code> under Rules so it stops double counting.</p>
+    <pre class="filelist" id="statDupes"></pre>
+  </details>
+  <details class="fold"><summary>Files loaded</summary>
+    <pre class="filelist" id="statFiles"></pre>
+  </details>
+  <details class="fold"><summary>Rules</summary>
+    <p class="note" style="margin-top:9px">These decide which day a line belongs to and which rows count. <code>reportDateCategories</code> land on their own expected date; every other category lands on expected date + 1, because it is read on the next morning's report. Use <code>itemOverrides</code> for the exceptions — key is <code>CITY|Category|Item</code>, value is <code>reportDate</code> or <code>previousDay</code>. Saving rebuilds the dashboard from the stored lines; nothing is re-uploaded.</p>
+    <textarea id="rulesBox" spellcheck="false" aria-label="Rules as JSON"></textarea>
+    <div class="tools" style="margin-top:9px">
+      <button class="ctl" id="rulesSave">Save rules</button>
+      <button class="ctl" id="rulesReset">Restore defaults</button>
+    </div>
+  </details>
+  <div class="tools" style="margin-top:14px">
+    <button class="ctl" id="backupBtn">Download backup</button>
+    <label class="ctl filelabel">Restore backup<input type="file" id="restoreFile" accept=".json,application/json" hidden></label>
+    <button class="ctl" id="clearBtn">Clear stored data</button>
+  </div>
+</section>
+
+<div class="bar">
+  <span class="lab">Date</span>
+  <select class="ctl" id="dateSel"></select>
+  <span class="sep"></span>
+  <span class="lab">City</span>
+  <button class="ctl" id="cityBLR" aria-pressed="true">BLR</button>
+  <button class="ctl" id="cityNCR" aria-pressed="true">Delhi-NCR</button>
+  <span class="sep"></span>
+  <span class="lab">Category</span>
+  <select class="ctl" id="catSel"></select>
+</div>
+
+<section>
+  <h2 id="glanceH">At a glance</h2>
+  <p class="note">Fill rate is Sent ÷ Ordered, identical to the daily log. <b>Short units</b> is the gross shortfall felt at pod level — every pod's own shortfall added up, so an over-send to one pod never hides a starved pod elsewhere.</p>
+  <div id="tiles"></div>
+</section>
+
+<section>
+  <h2>Every category, this date</h2>
+  <p class="note">Click any card to filter the whole dashboard to that category.</p>
+  <div id="catcards"></div>
+</section>
+
+<section>
+  <h2>Day-wise trend</h2>
+  <p class="note">Fill rate and gross short units by report date for the selected category. Hover for the exact day.</p>
+  <div class="legend" id="trendLegend"></div>
+  <div class="chartbox" id="chartFill"></div>
+  <div class="chartbox" id="chartShort" style="margin-top:6px"></div>
+</section>
+
+<section>
+  <h2>Was the cut shared, or did some pods get starved?</h2>
+  <p class="note">Each short item is classified by how the available quantity was split across the pods that ordered it. <b>Pro-rata cut</b> — everyone took a similar percentage hit (a production/supply problem). <b>Uneven</b> — some pods served in full while others got zero or near-zero (an allocation problem). <b>Total stock-out</b> — nothing sent to anyone.</p>
+  <div class="legend">
+    <span class="k"><span class="sw" style="background:var(--s1)"></span>Pro-rata cut</span>
+    <span class="k"><span class="sw" style="background:var(--s2)"></span>Uneven allocation</span>
+    <span class="k"><span class="sw" style="background:var(--s3)"></span>Total stock-out</span>
+  </div>
+  <div id="patterns"></div>
+</section>
+
+<section>
+  <h2>Which pods absorbed the hit</h2>
+  <p class="note">Ranked by gross short units for the selected date and category. Click a pod to see the lines it was short on.</p>
+  <div class="tools">
+    <button class="ctl" id="podSortShort" aria-pressed="true">Sort by short units</button>
+    <button class="ctl" id="podSortFill" aria-pressed="false">Sort by fill %</button>
+  </div>
+  <div id="podbars"></div>
+  <div id="poddrill"></div>
+</section>
+
+<section>
+  <h2>Item → pod bifurcation</h2>
+  <p class="note">Short-supplied items, biggest gross shortfall first. Click a row for the pod-level split of what was actually sent. Mini bars are each pod's fill % — red means that pod received nothing.</p>
+  <div class="tools">
+    <input type="search" id="q" placeholder="Search item or pod…" aria-label="Search item or pod">
+    <button class="ctl" id="fltAll" aria-pressed="true">All patterns</button>
+    <button class="ctl" id="fltUneven" aria-pressed="false">Uneven only</button>
+    <button class="ctl" id="fltZero" aria-pressed="false">Has zero-supplied pods</button>
+  </div>
+  <div style="overflow-x:auto"><table id="itemtbl"><thead><tr>
+    <th>Item</th><th>Category</th><th class="n">Ordered</th><th class="n">Sent</th><th class="n">Received</th>
+    <th class="n">Short</th><th class="n">Fill %</th><th class="n">Pods</th><th class="n">Zero</th>
+    <th>Spread</th><th>Pattern</th></tr></thead><tbody></tbody></table></div>
+  <p class="foothint" id="itemcount"></p>
+</section>
+
+<section>
+  <h2>Ordered → Sent → Received</h2>
+  <p class="note">Limited to internal orders that reached a terminal status (closed / received / force_closed) so the received leg is comparable — orders still <i>confirmed</i> or <i>sent</i> simply have not been booked in yet and would read as a false loss. Sent → Received is quantity that left the warehouse but was never GRN'd at the pod.</p>
+  <div id="funnel"></div>
+</section>
+
+<p class="foothint">Source: daily internal order exports. Rows with Internal Order Status = <code>ordered</code> excluded. BLR Production In-house / F&amp;V read the report date except the 7 night-dispatch CK RMs (previous day); Delhi-NCR Dry RM reads the previous day except the 4 GGN bakery items (report date); all other categories read the previous day.</p>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+/* =========================================================================
+   IO Fill Rate — data engine
+   Everything below turns raw "Internal Order Products By Line Entry" CSV
+   exports into the aggregate the dashboard renders, and keeps the raw lines
+   in the browser (IndexedDB) so history builds up across uploads.
+   ========================================================================= */
+
+/* ---------- rules you can edit from the UI (Data → Rules) ---------- */
+const DEFAULT_RULES = {
+  /* Which date column drives the business day. "expected" | "ordered" */
+  dateBasis: "expected",
+
+  /* Categories whose lines land on their own expected date.
+     Every other category lands on expected date + 1 day, because it is read
+     on the next morning's report. */
+  reportDateCategories: ["Production In-house", "F&V"],
+
+  /* Per-item exceptions. Key: "CITY|Category|Item", value: "reportDate"
+     (lands on the expected date) or "previousDay" (lands on expected + 1).
+     Seeded with the night-dispatch CK RMs and the GGN bakery items. */
+  itemOverrides: {
+    "BLR|Production In-house|Bhel Puri Mixture (CK)": "previousDay",
+    "BLR|Production In-house|Masala Peanut (CK)": "previousDay",
+    "BLR|Production In-house|Papdi (CK)": "previousDay",
+    "BLR|Production In-house|Podi (CK)": "previousDay",
+    "BLR|Production In-house|Poha Mixture (CK)": "previousDay",
+    "BLR|Production In-house|Red Masala (CK)": "previousDay",
+    "NCR|Dry RM|Brioche Bun 4\" - GGN": "reportDate",
+    "NCR|Dry RM|Mumbai Pav - GGN": "reportDate",
+    "NCR|Dry RM|Sandwich Bread - GGN": "reportDate",
+    "NCR|Dry RM|Tutti Frutti Bun - GGN": "reportDate"
+  },
+
+  /* Order statuses dropped completely. */
+  excludeStatuses: ["ordered"],
+
+  /* Indent reference numbers to drop, for duplicate indents raised twice.
+     Suspected duplicates are listed under Data → Duplicate indents. */
+  excludeReferenceNumbers: [],
+
+  /* Statuses counted in the Ordered → Sent → Received funnel. */
+  terminalStatuses: ["closed", "received", "force_closed"],
+
+  /* Pod-code prefix → city bucket. */
+  cityMap: { BLR: "BLR", GGN: "NCR", NOI: "NCR", DEL: "NCR", GZB: "NCR" },
+
+  /* Spread above which an allocation is called uneven rather than pro-rata. */
+  unevenThreshold: 0.12,
+
+  /* Fill rate below which a pod-category line counts as badly short. */
+  lowFillThreshold: 0.7,
+
+  /* Business days of raw lines to keep. Older lines are dropped on upload. */
+  retentionDays: 90
+};
+
+/* ---------- CSV columns we read ---------- */
+const COL = {
+  id:   "Product Line Entry ID",
+  cat:  "Category",
+  item: "Product Full Name",
+  uom:  "Unit Of Measure",
+  ord:  "Ordered Quantity",
+  sent: "Sent Quantity",
+  recd: "Received Quantity",
+  pod:  "Internal Order From Location",
+  whs:  "Internal Order To Location",
+  st:   "Internal Order Status Name",
+  dOrd: "Internal Order Ordered Date",
+  dExp: "Internal Order Expected Date",
+  ref:  "Internal Order Reference Number"
+};
+
+/* ---------- tiny CSV reader (RFC 4180, quotes + embedded newlines) ------ */
+function parseCSV(text) {
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  const rows = [];
+  let row = [], field = "", i = 0, quoted = false;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        quoted = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"') { quoted = true; i++; continue; }
+    if (c === ",") { row.push(field); field = ""; i++; continue; }
+    if (c === "\r") { i++; continue; }
+    if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; i++; continue; }
+    field += c; i++;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/* ---------- helpers ---------- */
+const num = v => { const x = parseFloat(String(v).replace(/,/g, "")); return isFinite(x) ? x : 0; };
+const r4 = v => Math.round(v * 10000) / 10000;
+const pad2 = v => String(v).padStart(2, "0");
+
+/* accepts dd-mm-yyyy, dd/mm/yyyy, yyyy-mm-dd → returns {y,m,d} or null */
+function readDate(s) {
+  s = String(s || "").trim();
+  if (!s || s === "--") return null;
+  let m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (m) return { d: +m[1], m: +m[2], y: +m[3] };
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return { y: +m[1], m: +m[2], d: +m[3] };
+  return null;
+}
+const keyOf = o => `${pad2(o.d)}-${pad2(o.m)}-${o.y}`;
+const shiftDay = (o, days) => {
+  const t = new Date(Date.UTC(o.y, o.m - 1, o.d + days));
+  return { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate() };
+};
+const sortKey = k => { const [d, m, y] = k.split("-"); return y + m + d; };
+
+/* ---------- IndexedDB ---------- */
+const DB_NAME = "swish-io-fill-rate", DB_VER = 1;
+let _db = null;
+function db() {
+  if (_db) return Promise.resolve(_db);
+  return new Promise((res, rej) => {
+    const rq = indexedDB.open(DB_NAME, DB_VER);
+    rq.onupgradeneeded = () => {
+      const d = rq.result;
+      if (!d.objectStoreNames.contains("lines")) {
+        const s = d.createObjectStore("lines", { keyPath: "id" });
+        s.createIndex("day", "day");
+      }
+      if (!d.objectStoreNames.contains("meta")) d.createObjectStore("meta", { keyPath: "k" });
+    };
+    rq.onsuccess = () => { _db = rq.result; res(_db); };
+    rq.onerror = () => rej(rq.error);
+  });
+}
+function tx(store, mode) { return db().then(d => d.transaction(store, mode).objectStore(store)); }
+function idbGet(store, key) {
+  return tx(store, "readonly").then(s => new Promise((res, rej) => {
+    const r = s.get(key); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+}
+function idbPut(store, val) {
+  return tx(store, "readwrite").then(s => new Promise((res, rej) => {
+    const r = s.put(val); r.onsuccess = () => res(); r.onerror = () => rej(r.error);
+  }));
+}
+function idbAll(store) {
+  return tx(store, "readonly").then(s => new Promise((res, rej) => {
+    const r = s.getAll(); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error);
+  }));
+}
+function idbClear(store) {
+  return tx(store, "readwrite").then(s => new Promise((res, rej) => {
+    const r = s.clear(); r.onsuccess = () => res(); r.onerror = () => rej(r.error);
+  }));
+}
+function idbBulkPut(records) {
+  return db().then(d => new Promise((res, rej) => {
+    const t = d.transaction("lines", "readwrite"), s = t.objectStore("lines");
+    records.forEach(r => s.put(r));
+    t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+  }));
+}
+
+/* ---------- rules ---------- */
+let RULES = { ...DEFAULT_RULES };
+async function loadRules() {
+  const saved = await idbGet("meta", "rules");
+  RULES = { ...DEFAULT_RULES, ...(saved && saved.v ? saved.v : {}) };
+  return RULES;
+}
+const saveRules = v => idbPut("meta", { k: "rules", v });
+
+/* ---------- ingest ---------- */
+function cityOf(pod) {
+  const pre = String(pod || "").split("-")[0].trim().toUpperCase();
+  return RULES.cityMap[pre] || null;
+}
+
+/* one CSV file → normalised line records */
+function normalise(text, fileName) {
+  const rows = parseCSV(text);
+  if (!rows.length) throw new Error(`${fileName} is empty.`);
+  const head = rows[0].map(h => h.replace(/^\ufeff/, "").trim());
+  const ix = {};
+  for (const k in COL) {
+    const j = head.findIndex(h => h.toLowerCase() === COL[k].toLowerCase());
+    if (j < 0) throw new Error(`${fileName} has no "${COL[k]}" column.`);
+    ix[k] = j;
+  }
+  const out = [], skipped = { noCity: 0, noDate: 0 };
+  for (let i = 1; i < rows.length; i++) {
+    const rw = rows[i];
+    if (rw.length < head.length - 2) continue;
+    const pod = (rw[ix.pod] || "").trim();
+    const city = cityOf(pod);
+    if (!city) { skipped.noCity++; continue; }
+    const base = readDate(RULES.dateBasis === "ordered" ? rw[ix.dOrd] : rw[ix.dExp]);
+    if (!base) { skipped.noDate++; continue; }
+    out.push({
+      id: rw[ix.id],
+      day: keyOf(base),
+      pod, city,
+      cat: (rw[ix.cat] || "Uncategorised").trim(),
+      item: (rw[ix.item] || "").trim(),
+      uom: (rw[ix.uom] || "").trim(),
+      st: (rw[ix.st] || "").trim().toLowerCase(),
+      ref: (rw[ix.ref] || "").trim(),
+      o: num(rw[ix.ord]), s: num(rw[ix.sent]), r: num(rw[ix.recd])
+    });
+  }
+  return { records: out, skipped };
+}
+
+async function ingestFiles(files, onProgress) {
+  const report = { files: [], added: 0, skipped: { noCity: 0, noDate: 0 } };
+  for (const f of files) {
+    onProgress && onProgress(`Reading ${f.name}…`);
+    const text = await f.text();
+    const { records, skipped } = normalise(text, f.name);
+    onProgress && onProgress(`Saving ${records.length.toLocaleString("en-IN")} lines from ${f.name}…`);
+    for (let i = 0; i < records.length; i += 2000) await idbBulkPut(records.slice(i, i + 2000));
+    report.files.push({ name: f.name, rows: records.length, at: Date.now() });
+    report.added += records.length;
+    report.skipped.noCity += skipped.noCity;
+    report.skipped.noDate += skipped.noDate;
+  }
+  const man = (await idbGet("meta", "files")) || { k: "files", v: [] };
+  man.v = [...report.files, ...man.v].slice(0, 60);
+  await idbPut("meta", man);
+  await prune();
+  return report;
+}
+
+/* drop business days older than the retention window */
+async function prune() {
+  const days = +RULES.retentionDays || 0;
+  if (!days) return;
+  const all = await idbAll("lines");
+  const keys = [...new Set(all.map(r => r.day))].sort((a, b) => sortKey(a) < sortKey(b) ? 1 : -1);
+  const keep = new Set(keys.slice(0, days + 2));
+  const drop = all.filter(r => !keep.has(r.day)).map(r => r.id);
+  if (!drop.length) return;
+  const d = await db();
+  await new Promise(res => {
+    const t = d.transaction("lines", "readwrite"), s = t.objectStore("lines");
+    drop.forEach(id => s.delete(id));
+    t.oncomplete = res;
+  });
+}
+
+/* ---------- aggregation ---------- */
+function bucketDay(rec) {
+  const ov = RULES.itemOverrides[`${rec.city}|${rec.cat}|${rec.item}`];
+  const mode = ov || (RULES.reportDateCategories.includes(rec.cat) ? "reportDate" : "previousDay");
+  if (mode === "reportDate") return rec.day;
+  const p = readDate(rec.day);
+  return keyOf(shiftDay(p, 1));
+}
+
+function build(lines) {
+  const excl = new Set(RULES.excludeStatuses.map(s => s.toLowerCase()));
+  const skipRef = new Set(RULES.excludeReferenceNumbers || []);
+  const term = new Set(RULES.terminalStatuses.map(s => s.toLowerCase()));
+
+  /* day → city|cat|item → pod → sums */
+  const days = new Map();
+  for (const rec of lines) {
+    if (excl.has(rec.st) || skipRef.has(rec.ref)) continue;
+    const day = bucketDay(rec);
+    let D = days.get(day);
+    if (!D) { D = { items: new Map(), pods: new Set() }; days.set(day, D); }
+    D.pods.add(rec.pod);
+    const ik = `${rec.city}\u0000${rec.cat}\u0000${rec.item}`;
+    let I = D.items.get(ik);
+    if (!I) {
+      I = { c: rec.city, g: rec.cat, i: rec.item, u: rec.uom, pods: new Map(),
+            t_o: 0, t_s: 0, t_r: 0 };
+      D.items.set(ik, I);
+    }
+    let P = I.pods.get(rec.pod);
+    if (!P) { P = { o: 0, s: 0, r: 0 }; I.pods.set(rec.pod, P); }
+    P.o += rec.o; P.s += rec.s; P.r += rec.r;
+    if (term.has(rec.st)) { I.t_o += rec.o; I.t_s += rec.s; I.t_r += rec.r; }
+  }
+
+  const dates = [...days.keys()].sort((a, b) => sortKey(a) < sortKey(b) ? -1 : 1);
+  const detail = {}, trend = [];
+  const catTotals = new Map();
+
+  for (const day of dates) {
+    const D = days.get(day);
+    const pods = [...D.pods].sort();
+    const podIx = new Map(pods.map((p, i) => [p, i]));
+
+    const items = [], catAgg = new Map(), pcAgg = new Map();
+
+    for (const I of D.items.values()) {
+      const pr = [];
+      let o = 0, s = 0, r = 0, sh = 0, z = 0, fp = 0;
+      const ratios = [];
+      for (const [pod, P] of I.pods) {
+        const short = Math.max(0, P.o - P.s);
+        o += P.o; s += P.s; r += P.r; sh += short;
+        if (P.s === 0) z++;
+        if (P.s >= P.o) fp++;
+        ratios.push(P.o ? P.s / P.o : 0);
+        pr.push([podIx.get(pod), r4(P.o), r4(P.s), r4(P.r), P.o ? P.s / P.o : 0]);
+      }
+      o = r4(o); s = r4(s); r = r4(r); sh = r4(sh);
+      const np = pr.length;
+      let sp = 0;
+      if (np > 1) {
+        const mean = ratios.reduce((a, b) => a + b, 0) / np;
+        sp = Math.sqrt(ratios.reduce((a, b) => a + (b - mean) ** 2, 0) / (np - 1));
+      }
+      sp = Math.round(sp * 1000) / 1000;
+      const f = o ? r4(s / o) : 0;
+      const p = np === 1 ? "single pod"
+              : s === 0 ? "total stock-out"
+              : sp > RULES.unevenThreshold ? "uneven" : "pro-rata cut";
+
+      pr.sort((a, b) => (a[4] - b[4]) || (b[1] - a[1]));
+      const rec = { c: I.c, g: I.g, i: I.i, u: I.u, o, s, r, sh, f, np, z, fp, sp, p };
+      if (sh > 0) rec.pr = pr.map(x => [x[0], x[1], x[2], x[3]]);
+      items.push(rec);
+
+      /* category roll-up */
+      const ck = I.c + "\u0000" + I.g;
+      let C = catAgg.get(ck);
+      if (!C) { C = { c: I.c, g: I.g, o: 0, s: 0, r: 0, sh: 0, items: 0, pods: new Set(),
+                      t_o: 0, t_s: 0, t_r: 0 }; catAgg.set(ck, C); }
+      C.o += o; C.s += s; C.r += r; C.sh += sh; C.items++;
+      C.t_o += I.t_o; C.t_s += I.t_s; C.t_r += I.t_r;
+      for (const pod of I.pods.keys()) C.pods.add(pod);
+
+      /* pod × category roll-up */
+      for (const [pod, P] of I.pods) {
+        const pk = I.c + "\u0000" + I.g + "\u0000" + podIx.get(pod);
+        let A = pcAgg.get(pk);
+        if (!A) { A = { c: I.c, g: I.g, p: podIx.get(pod), o: 0, s: 0, r: 0, sh: 0, z: 0, lo: 0 };
+                  pcAgg.set(pk, A); }
+        A.o += P.o; A.s += P.s; A.r += P.r; A.sh += Math.max(0, P.o - P.s);
+        if (P.s === 0) A.z++;
+        if (P.o && P.s / P.o < RULES.lowFillThreshold) A.lo++;
+      }
+    }
+
+    items.sort((a, b) => (b.sh - a.sh) || a.c.localeCompare(b.c) ||
+                          a.g.localeCompare(b.g) || a.i.localeCompare(b.i));
+
+    const cat = [...catAgg.values()]
+      .sort((a, b) => a.c.localeCompare(b.c) || a.g.localeCompare(b.g))
+      .map(C => {
+        const row = [C.c, C.g, r4(C.o), r4(C.s), r4(C.r), r4(C.sh), C.items, C.pods.size,
+                     r4(C.t_o), r4(C.t_s), r4(C.t_r), r4(C.o - C.t_o)];
+        trend.push([day, ...row]);
+        catTotals.set(C.g, (catTotals.get(C.g) || 0) + C.sh);
+        return row;
+      });
+
+    const pod_cat = [...pcAgg.values()]
+      .sort((a, b) => a.c.localeCompare(b.c) || a.g.localeCompare(b.g) || a.p - b.p)
+      .map(A => [A.c, A.g, A.p, r4(A.o), r4(A.s), r4(A.r), r4(A.sh), A.z, A.lo]);
+
+    detail[day] = {
+      date: day, pods, pod_cat, items, cat,
+      schema: {
+        pod_cat: ["city", "cat", "pod", "ord", "sent", "recd", "short", "zero_items", "sub70"],
+        cat: ["city", "cat", "ord", "sent", "recd", "short", "items", "pods",
+              "t_ord", "t_sent", "t_recd", "open_ord"]
+      }
+    };
+  }
+
+  const cat_order = [...catTotals.entries()]
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0])).map(x => x[0]);
+
+  return { dates, detail_dates: dates, trend, detail, cat_order,
+           schema: { trend: ["date", "city", "cat", "ord", "sent", "recd", "short", "items",
+                             "pods", "t_ord", "t_sent", "t_recd", "open_ord"] } };
+}
+
+/* ---------- duplicate indent detector ----------------------------------
+   Two indents raised for the same pod, item, day and quantity double count
+   the order. This finds the reference-number pairs that overlap most. */
+function findDuplicateIndents(lines) {
+  const excl = new Set(RULES.excludeStatuses.map(s => s.toLowerCase()));
+  const groups = new Map();
+  for (const r of lines) {
+    if (excl.has(r.st) || !r.ref) continue;
+    const k = [r.day, r.pod, r.cat, r.item, r.o].join("\u0000");
+    let g = groups.get(k); if (!g) { g = new Set(); groups.set(k, g); }
+    g.add(r.ref);
+  }
+  const pairs = new Map();
+  for (const g of groups.values()) {
+    if (g.size < 2) continue;
+    const refs = [...g].sort();
+    for (let i = 0; i < refs.length; i++)
+      for (let j = i + 1; j < refs.length; j++) {
+        const k = refs[i] + " ↔ " + refs[j];
+        pairs.set(k, (pairs.get(k) || 0) + 1);
+      }
+  }
+  return [...pairs.entries()].filter(([, n]) => n >= 5)
+    .sort((a, b) => b[1] - a[1]).slice(0, 20);
+}
+
+
+/* =========================================================================
+   Dashboard renderer — unchanged from the original, wrapped so it can be
+   handed a freshly built DATA object.
+   ========================================================================= */
+window.__mountDashboard = function(DATA){
+const CITY_LABEL = {BLR:'BLR', NCR:'Delhi-NCR (GGN+NOI+DEL)'};
+const CITY_SHORT = {BLR:'BLR', NCR:'Delhi-NCR'};
+const CITY_COLOR = {BLR:'var(--s1)', NCR:'var(--s2)'};
+const T = {DATE:0, CITY:1, CAT:2, ORD:3, SENT:4, RECD:5, SHORT:6, ITEMS:7, PODS:8,
+           TORD:9, TSENT:10, TRECD:11, OPEN:12};
+
+let date = DATA.dates[DATA.dates.length-1];
+let cities = {BLR:true, NCR:true};
+let cat = 'ALL', podSort='short', itemFilter='all', query='', selPod=null;
+let openItems = new Set();
+
+const fmt = n => (Math.round(n*100)/100).toLocaleString('en-IN');
+const pct = v => (v==null||isNaN(v)) ? '—' : (v*100).toFixed(1)+'%';
+const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const act = () => ['BLR','NCR'].filter(c=>cities[c]);
+const det = () => DATA.detail[date] || null;
+const hasDetail = () => !!DATA.detail[date];
+
+const ICON = {
+  good:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M6.2 11.4 3 8.2l1.1-1.1 2.1 2.1 5-5L12.3 5.3z"/></svg>',
+  warning:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6 15 14H1zM7.2 6h1.6v4H7.2zm0 5h1.6v1.6H7.2z"/></svg>',
+  critical:'<svg viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="7"/><path d="M7.2 4h1.6v5H7.2zm0 6h1.6v1.6H7.2z" fill="var(--surface-1)"/></svg>'};
+const flagOf = f => f>=0.95?{k:'good',t:'OK'}:f>=0.85?{k:'warning',t:'Watch'}:{k:'critical',t:'Check'};
+const chip = f => {const x=flagOf(f); return `<span class="chip" style="color:var(--${x.k})">${ICON[x.k]}${x.t}</span>`;};
+
+/* ---------- tooltip ---------- */
+const tipEl = document.getElementById('tip');
+function showTip(e,html){
+  tipEl.innerHTML=html; tipEl.style.opacity=1;
+  const r=tipEl.getBoundingClientRect();
+  let x=e.clientX+14, y=e.clientY+14;
+  if(x+r.width>innerWidth-8) x=e.clientX-r.width-12;
+  if(y+r.height>innerHeight-8) y=e.clientY-r.height-12;
+  tipEl.style.left=x+'px'; tipEl.style.top=y+'px';
+}
+const hideTip = ()=> tipEl.style.opacity=0;
+function bindTip(el,html){
+  el.addEventListener('mousemove',e=>showTip(e,html));
+  el.addEventListener('mouseleave',hideTip);
+}
+
+/* ---------- data helpers ---------- */
+function trendFor(city,category){
+  const out={};
+  DATA.trend.forEach(r=>{
+    if(r[T.CITY]!==city) return;
+    if(category!=='ALL' && r[T.CAT]!==category) return;
+    const d=r[T.DATE];
+    const o=out[d]||(out[d]={ord:0,sent:0,recd:0,short:0,tord:0,tsent:0,trecd:0,open:0});
+    o.ord+=r[T.ORD]; o.sent+=r[T.SENT]; o.recd+=r[T.RECD]; o.short+=r[T.SHORT];
+    o.tord+=r[T.TORD]; o.tsent+=r[T.TSENT]; o.trecd+=r[T.TRECD]; o.open+=r[T.OPEN];
+  });
+  return DATA.dates.map(d=>({date:d, ...(out[d]||{ord:0,sent:0,recd:0,short:0,tord:0,tsent:0,trecd:0,open:0})}));
+}
+function dayCity(city,category){
+  const rows = DATA.trend.filter(r=>r[T.DATE]===date && r[T.CITY]===city
+      && (category==='ALL'||r[T.CAT]===category));
+  const a={ord:0,sent:0,recd:0,short:0,items:0,tord:0,tsent:0,trecd:0,open:0,pods:0};
+  rows.forEach(r=>{a.ord+=r[T.ORD];a.sent+=r[T.SENT];a.recd+=r[T.RECD];a.short+=r[T.SHORT];
+    a.items+=r[T.ITEMS];a.tord+=r[T.TORD];a.tsent+=r[T.TSENT];a.trecd+=r[T.TRECD];a.open+=r[T.OPEN];
+    a.pods=Math.max(a.pods,r[T.PODS]);});
+  return a;
+}
+function podRows(){
+  const d=det(); if(!d) return [];
+  const m={};
+  d.pod_cat.forEach(r=>{
+    const [c,g,pi,o,s,rc,sh,zi,s7]=r;
+    if(!cities[c]) return; if(cat!=='ALL'&&g!==cat) return;
+    const k=c+'|'+pi, x=m[k]||(m[k]={city:c,pod:d.pods[pi],ord:0,sent:0,recd:0,short:0,zi:0,s7:0});
+    x.ord+=o; x.sent+=s; x.recd+=rc; x.short+=sh; x.zi+=zi; x.s7+=s7;
+  });
+  return Object.values(m).filter(x=>x.ord>0).map(x=>({...x,fill:x.sent/x.ord}));
+}
+function itemsFor(){
+  const d=det(); if(!d) return [];
+  return d.items.filter(i=>cities[i.c] && (cat==='ALL'||i.g===cat));
+}
+
+/* ---------- controls ---------- */
+function initControls(){
+  const ds=document.getElementById('dateSel');
+  ds.innerHTML = DATA.dates.slice().reverse().map(d=>
+    `<option value="${d}"${d===date?' selected':''}>${d}${DATA.detail[d]?'':' (summary only)'}</option>`).join('');
+  ds.onchange = e=>{ date=e.target.value; selPod=null; openItems.clear(); renderAll(); };
+  const cs=document.getElementById('catSel');
+  cs.innerHTML = `<option value="ALL">All categories</option>` +
+    DATA.cat_order.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  cs.onchange = e=>{ cat=e.target.value; selPod=null; openItems.clear(); renderAll(); };
+}
+function setCat(c){ cat=c; document.getElementById('catSel').value=c; selPod=null; openItems.clear(); renderAll(); }
+
+/* ---------- tiles ---------- */
+function renderTiles(){
+  document.getElementById('glanceH').textContent =
+    `At a glance — ${date}${cat==='ALL'?'':' · '+cat}`;
+  const host=document.getElementById('tiles'); host.innerHTML='';
+  act().forEach(c=>{
+    const a=dayCity(c,cat);
+    const items=itemsFor().filter(i=>i.c===c);
+    const shortItems=items.filter(i=>i.f<0.995).length;
+    const zeroLines=items.reduce((n,i)=>n+i.z,0);
+    const gap=a.tsent-a.trecd;
+    const h=document.createElement('div'); h.className='city-h';
+    h.innerHTML=`<span>${CITY_LABEL[c]}</span><span class="rule"></span>`;
+    host.appendChild(h);
+    const g=document.createElement('div'); g.className='tiles';
+    const fill=a.ord?a.sent/a.ord:NaN;
+    g.innerHTML=[
+      ['Fill rate',pct(fill),`${fmt(a.ord)} ordered → ${fmt(a.sent)} sent`,fill],
+      ['Gross short units',fmt(a.short),hasDetail()?`${shortItems} items short · ${zeroLines} pod-lines at zero`:'item detail not retained for this date',null],
+      ['Items ordered',fmt(a.items),`across ${a.pods} pods`,null],
+      ['Sent → Received gap',fmt(gap),`${pct(a.tsent?gap/a.tsent:NaN)} of dispatched, terminal orders only`,null]
+    ].map(([l,v,f,fl])=>`<div class="tile"><div class="lab">${l}</div><div class="val">${v}</div>
+       <div class="foot">${fl!=null&&!isNaN(fl)?chip(fl)+' ':''}${f}</div></div>`).join('');
+    host.appendChild(g);
+  });
+}
+
+/* ---------- category cards ---------- */
+function renderCatCards(){
+  const host=document.getElementById('catcards');
+  const rows=DATA.trend.filter(r=>r[T.DATE]===date && cities[r[T.CITY]]);
+  const m={};
+  rows.forEach(r=>{const x=m[r[T.CAT]]||(m[r[T.CAT]]={ord:0,sent:0,short:0});
+    x.ord+=r[T.ORD]; x.sent+=r[T.SENT]; x.short+=r[T.SHORT];});
+  const order=DATA.cat_order.filter(c=>m[c]);
+  host.innerHTML=`<div class="catgrid">${order.map(c=>{
+    const x=m[c], f=x.ord?x.sent/x.ord:NaN, fl=flagOf(f);
+    return `<div class="catcard" data-c="${esc(c)}"${cat===c?' style="outline:1px solid var(--border);background:var(--ghost)"':''}>
+      <div class="cn">${esc(c)}</div>
+      <div class="cf">${pct(f)} <span style="font-size:12px;font-weight:500;color:var(--${fl.k})">${fl.t}</span></div>
+      <div class="cd">${fmt(x.ord)} ordered · <b style="color:var(--text-primary)">${fmt(x.short)}</b> short</div>
+      <div class="meter"><i style="width:${Math.min(f*100,100)}%;background:var(--${fl.k})"></i></div>
+    </div>`;}).join('')}</div>`;
+  host.querySelectorAll('.catcard').forEach(el=>{
+    el.onclick=()=>setCat(cat===el.dataset.c?'ALL':el.dataset.c);
+  });
+}
+
+/* ---------- charts ---------- */
+function lineChart(host,series,fmtY,title){
+  const W=host.clientWidth||900, H=190, L=48, R=94, TP=14, B=30;
+  const dates=DATA.dates, n=dates.length;
+  const all=series.flatMap(s=>s.pts.filter(v=>v!=null));
+  if(!all.length){ host.innerHTML=''; return; }
+  let lo=Math.min(...all), hi=Math.max(...all);
+  if(lo===hi){lo-=0.05;hi+=0.05;}
+  const pad=(hi-lo)*0.14; lo=Math.max(0,lo-pad); hi=hi+pad;
+  const X=i=> n===1 ? L+(W-L-R)/2 : L+i*(W-L-R)/(n-1);
+  const Y=v=> TP+(hi-v)/(hi-lo)*(H-TP-B);
+  const ticks=4, gy=[...Array(ticks+1)].map((_,k)=>lo+(hi-lo)*k/ticks);
+  const step=Math.max(1,Math.ceil(n/9));
+  let s=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${title}">`;
+  gy.forEach(v=>{s+=`<line x1="${L}" x2="${W-R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>
+    <text x="${L-8}" y="${(Y(v)+4).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--muted)">${fmtY(v)}</text>`;});
+  dates.forEach((d,i)=>{ if(i%step===0||i===n-1)
+    s+=`<text x="${X(i).toFixed(1)}" y="${H-10}" text-anchor="middle" font-size="11" fill="var(--muted)">${d.slice(0,5)}</text>`;});
+  series.forEach(se=>{
+    const segs=[]; let cur=[];
+    se.pts.forEach((v,i)=>{ if(v==null){ if(cur.length)segs.push(cur); cur=[]; } else cur.push([X(i),Y(v)]); });
+    if(cur.length)segs.push(cur);
+    segs.forEach(pp=>{ s+=`<path d="M${pp.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join('L')}" fill="none"
+      stroke="${se.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+      pp.forEach(p=>{s+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.2" fill="${se.color}" stroke="var(--surface-1)" stroke-width="2"/>`;});
+    });
+    const li=se.pts.map((v,i)=>v==null?-1:i).filter(i=>i>=0).pop();
+    if(li>=0) s+=`<text x="${(X(li)+9).toFixed(1)}" y="${(Y(se.pts[li])+4).toFixed(1)}" font-size="11.5"
+      font-weight="600" fill="var(--text-secondary)">${se.name}</text>`;
+  });
+  s+=`<line id="ch" x1="0" x2="0" y1="${TP}" y2="${H-B}" stroke="var(--baseline)" stroke-width="1" opacity="0"/>`;
+  s+=`<rect x="${L}" y="${TP}" width="${Math.max(W-L-R,1)}" height="${H-TP-B}" fill="transparent" id="hit"/></svg>`;
+  host.innerHTML=s;
+  const svg=host.querySelector('svg'), ch=svg.querySelector('#ch');
+  svg.querySelector('#hit').addEventListener('mousemove',e=>{
+    const bb=svg.getBoundingClientRect();
+    const i=n===1?0:Math.max(0,Math.min(n-1,Math.round((e.clientX-bb.left-L)/((W-L-R)/(n-1)))));
+    ch.setAttribute('x1',X(i)); ch.setAttribute('x2',X(i)); ch.setAttribute('opacity','1');
+    showTip(e,`<b>${dates[i]}</b><br>`+series.map(se=>
+      `${se.name}: <b>${se.pts[i]==null?'—':fmtY(se.pts[i])}</b>`).join('<br>'));
+  });
+  svg.querySelector('#hit').addEventListener('mouseleave',()=>{ch.setAttribute('opacity','0');hideTip();});
+}
+function barChart(host,series,title){
+  const W=host.clientWidth||900, H=150, L=70, R=94, TP=12, B=30;
+  const dates=DATA.dates, n=dates.length, k=series.length;
+  const hi=Math.max(1,...series.flatMap(s=>s.pts.map(v=>v||0)));
+  const bw=Math.max(2,Math.min(22,((W-L-R)/n)/k-2));
+  const X=i=> L+(i+0.5)*(W-L-R)/n;
+  const Y=v=> TP+(1-v/hi)*(H-TP-B);
+  const ticks=3, gy=[...Array(ticks+1)].map((_,j)=>hi*j/ticks);
+  const step=Math.max(1,Math.ceil(n/9));
+  let s=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${title}">`;
+  gy.forEach(v=>{s+=`<line x1="${L}" x2="${W-R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>
+    <text x="${L-8}" y="${(Y(v)+4).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--muted)">${fmt(Math.round(v))}</text>`;});
+  dates.forEach((d,i)=>{ if(i%step===0||i===n-1)
+    s+=`<text x="${X(i).toFixed(1)}" y="${H-10}" text-anchor="middle" font-size="11" fill="var(--muted)">${d.slice(0,5)}</text>`;});
+  dates.forEach((d,i)=>{
+    series.forEach((se,j)=>{
+      const v=se.pts[i]||0; if(v<=0) return;
+      const x=X(i)-(k*(bw+2)-2)/2+j*(bw+2), y=Y(v);
+      s+=`<rect class="bk" data-i="${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}"
+        height="${Math.max(H-B-y,1).toFixed(1)}" rx="3" fill="${se.color}"/>`;
+    });
+  });
+  s+=`<line x1="${L}" x2="${W-R}" y1="${H-B}" y2="${H-B}" stroke="var(--baseline)" stroke-width="1"/></svg>`;
+  host.innerHTML=s;
+  host.querySelectorAll('.bk').forEach(r=>{
+    const i=+r.dataset.i;
+    bindTip(r,`<b>${dates[i]}</b><br>`+series.map(se=>`${se.name}: <b>${fmt(se.pts[i]||0)}</b> short`).join('<br>'));
+  });
+}
+function renderTrend(){
+  const ser=act().map(c=>({name:CITY_SHORT[c],color:CITY_COLOR[c],city:c,rows:trendFor(c,cat)}));
+  document.getElementById('trendLegend').innerHTML = ser.map(s=>
+    `<span class="k"><span class="sw" style="background:${s.color}"></span>${s.name}</span>`).join('')
+    + `<span style="color:var(--muted)">${cat==='ALL'?'all categories':esc(cat)}</span>`;
+  lineChart(document.getElementById('chartFill'),
+    ser.map(s=>({name:s.name,color:s.color,pts:s.rows.map(r=>r.ord?r.sent/r.ord:null)})),
+    v=>(v*100).toFixed(0)+'%','Fill rate by date');
+  barChart(document.getElementById('chartShort'),
+    ser.map(s=>({name:s.name,color:s.color,pts:s.rows.map(r=>r.short)})),'Gross short units by date');
+}
+
+/* ---------- patterns ---------- */
+function renderPatterns(){
+  const host=document.getElementById('patterns');
+  if(!hasDetail()){ host.innerHTML='<p class="note">Item-level detail is not retained for this date.</p>'; return; }
+  const colors={'pro-rata cut':'var(--s1)','uneven':'var(--s2)','total stock-out':'var(--s3)','single pod':'var(--muted)'};
+  const order=['pro-rata cut','uneven','total stock-out','single pod'];
+  const rows=act().map(c=>{
+    const it=itemsFor().filter(i=>i.c===c && i.sh>0);
+    const m={}; it.forEach(i=>{const x=m[i.p]||(m[i.p]={n:0,short:0}); x.n++; x.short+=i.sh;});
+    return {city:c, ps:order.filter(p=>m[p]).map(p=>({pattern:p,...m[p]})), tot:it.reduce((a,b)=>a+b.sh,0)};
+  });
+  const max=Math.max(...rows.map(r=>r.tot),1);
+  host.innerHTML='';
+  rows.forEach(r=>{
+    const d=document.createElement('div'); d.className='stackrow';
+    d.innerHTML=`<div class="stacklab"><b style="color:var(--text-primary)">${CITY_LABEL[r.city]}</b>
+        <span>${fmt(r.tot)} short units</span></div>
+      <div class="stack" style="width:${Math.max(r.tot/max*100,0.5)}%">${r.ps.map(p=>
+        `<div data-t="${esc(p.pattern)}|${p.n}|${fmt(p.short)}" style="background:${colors[p.pattern]};
+          width:${p.short/r.tot*100}%;border-radius:3px"></div>`).join('')}</div>
+      <div class="kv" style="margin-top:6px">${r.ps.map(p=>
+        `<span class="pill">${esc(p.pattern)}: <b style="color:var(--text-primary)">${fmt(p.short)}</b> · ${p.n} items</span>`).join('')}</div>`;
+    host.appendChild(d);
+    d.querySelectorAll('.stack > div').forEach(sg=>{
+      const [p,n,sh]=sg.dataset.t.split('|');
+      bindTip(sg,`<b>${esc(p)}</b><br>${n} items · ${sh} short units`);
+    });
+  });
+}
+
+/* ---------- pods ---------- */
+function renderPods(){
+  const host=document.getElementById('podbars');
+  if(!hasDetail()){ host.innerHTML='<p class="note">Pod-level detail is not retained for this date.</p>';
+    document.getElementById('poddrill').innerHTML=''; return; }
+  let rows=podRows();
+  rows.sort(podSort==='short'?(a,b)=>b.short-a.short:(a,b)=>a.fill-b.fill);
+  const max=Math.max(...rows.map(r=>r.short),1);
+  host.innerHTML=`<div class="bars">${rows.map(r=>`
+    <div class="brow${selPod===r.city+'|'+r.pod?' sel':''}" data-k="${esc(r.city+'|'+r.pod)}">
+      <div class="bname" title="${esc(r.pod)}">${esc(r.pod)}</div>
+      <div class="btrack"><div class="bfill" style="width:${Math.max(r.short/max*100,0.4)}%"></div></div>
+      <div class="bmeta"><b>${fmt(r.short)}</b> short · ${pct(r.fill)}</div></div>`).join('')}</div>`;
+  host.querySelectorAll('.brow').forEach(el=>{
+    const r=rows.find(x=>x.city+'|'+x.pod===el.dataset.k);
+    bindTip(el,`<b>${esc(r.pod)}</b> · ${CITY_SHORT[r.city]}<br>Ordered ${fmt(r.ord)} → Sent ${fmt(r.sent)} → Received ${fmt(r.recd)}<br>
+      Short <b>${fmt(r.short)}</b> · fill ${pct(r.fill)}<br>${r.zi} items at zero · ${r.s7} items below 70%`);
+    el.onclick=()=>{ selPod = selPod===el.dataset.k?null:el.dataset.k; renderPods(); };
+  });
+  renderPodDrill();
+}
+function renderPodDrill(){
+  const host=document.getElementById('poddrill');
+  if(!selPod||!hasDetail()){ host.innerHTML=''; return; }
+  const d=det(), [city,pod]=selPod.split('|'), pi=d.pods.indexOf(pod);
+  const lines=[];
+  itemsFor().filter(i=>i.c===city && i.pr).forEach(i=>{
+    i.pr.forEach(p=>{ if(p[0]!==pi) return;
+      const sh=Math.max(p[1]-p[2],0); if(sh<=0) return;
+      lines.push({item:i.i,cat:i.g,uom:i.u,ord:p[1],sent:p[2],recd:p[3],short:sh,fill:p[1]?p[2]/p[1]:null});
+    });
+  });
+  lines.sort((a,b)=>b.short-a.short);
+  host.innerHTML=`<div class="drill"><h3>${esc(pod)} — short lines${cat==='ALL'?'':' · '+esc(cat)} (${lines.length})</h3>
+    ${lines.length?`<div style="overflow-x:auto"><table><thead><tr><th>Item</th><th>Category</th>
+      <th class="n">Ordered</th><th class="n">Sent</th><th class="n">Received</th><th class="n">Short</th><th class="n">Fill %</th>
+      </tr></thead><tbody>${lines.slice(0,40).map(l=>`<tr><td>${esc(l.item)}</td>
+      <td style="font-size:12.5px;color:var(--text-secondary);white-space:nowrap">${esc(l.cat)}</td>
+      <td class="n">${fmt(l.ord)}</td><td class="n">${fmt(l.sent)}</td><td class="n">${fmt(l.recd)}</td>
+      <td class="n"><b>${fmt(l.short)}</b></td><td class="n">${pct(l.fill)}</td></tr>`).join('')}</tbody></table></div>
+      ${lines.length>40?`<p class="foothint">Showing the 40 largest of ${lines.length} short lines.</p>`:''}`
+      :`<p class="note">No short lines in this scope.</p>`}
+    <p class="foothint">A Received of 0 against a non-zero Sent usually means the pod has not booked the GRN yet, not that stock went missing.</p></div>`;
+}
+
+/* ---------- items ---------- */
+function itemRows(){
+  let rows=itemsFor().filter(i=>i.sh>0||i.f<0.995);
+  if(itemFilter==='uneven') rows=rows.filter(i=>i.p==='uneven');
+  if(itemFilter==='zero') rows=rows.filter(i=>i.z>0);
+  if(query){ const q=query.toLowerCase(); const d=det();
+    rows=rows.filter(i=> i.i.toLowerCase().includes(q) || i.g.toLowerCase().includes(q)
+      || (i.pr||[]).some(p=>d.pods[p[0]].toLowerCase().includes(q)));
+  }
+  return rows;
+}
+function mini(i){
+  if(!i.pr) return '';
+  const rows=i.pr.slice().sort((a,b)=>(a[1]?a[2]/a[1]:9)-(b[1]?b[2]/b[1]:9)).slice(0,34);
+  return `<span class="mini">${rows.map(p=>{
+    const f=Math.min(p[1]?p[2]/p[1]:0,1.5), h=Math.max(Math.round(f/1.5*14),2);
+    return `<i class="${p[2]===0?'z':''}" style="height:${h}px"></i>`;}).join('')}</span>`;
+}
+function renderItems(){
+  const tb=document.querySelector('#itemtbl tbody');
+  if(!hasDetail()){ tb.innerHTML='<tr><td colspan="11">Item-level detail is not retained for this date.</td></tr>';
+    document.getElementById('itemcount').textContent=''; return; }
+  const rows=itemRows(), d=det();
+  tb.innerHTML=rows.map(i=>{
+    const key=i.c+'|'+i.g+'|'+i.i, open=openItems.has(key);
+    let h=`<tr class="itemrow" data-k="${esc(key)}">
+      <td><b>${esc(i.i)}</b><div style="font-size:11.5px;color:var(--muted)">${CITY_SHORT[i.c]} · ${esc(i.u)}</div></td>
+      <td style="font-size:12.5px;color:var(--text-secondary);white-space:nowrap">${esc(i.g)}</td>
+      <td class="n">${fmt(i.o)}</td><td class="n">${fmt(i.s)}</td><td class="n">${fmt(i.r)}</td><td class="n"><b>${fmt(i.sh)}</b></td>
+      <td class="n">${pct(i.f)}</td><td class="n">${i.np}</td>
+      <td class="n">${i.z?`<span style="color:var(--critical);font-weight:650">${i.z}</span>`:'0'}</td>
+      <td>${mini(i)}</td><td><span class="pill">${esc(i.p)}</span></td></tr>`;
+    if(open&&i.pr) h+=i.pr.map(p=>`<tr class="podrow"><td>${esc(d.pods[p[0]])}</td><td></td>
+      <td class="n">${fmt(p[1])}</td><td class="n">${fmt(p[2])}</td><td class="n">${fmt(p[3])}</td>
+      <td class="n">${p[1]-p[2]>0?fmt(p[1]-p[2]):'—'}</td><td class="n">${pct(p[1]?p[2]/p[1]:null)}</td>
+      <td colspan="4"></td></tr>`).join('');
+    return h;
+  }).join('');
+  document.getElementById('itemcount').textContent =
+    `${rows.length} short-supplied item${rows.length===1?'':'s'} · ${fmt(rows.reduce((a,b)=>a+b.sh,0))} gross short units`;
+  tb.querySelectorAll('.itemrow').forEach(tr=>tr.onclick=()=>{
+    const k=tr.dataset.k; openItems.has(k)?openItems.delete(k):openItems.add(k); renderItems();
+  });
+}
+
+/* ---------- funnel ---------- */
+function renderFunnel(){
+  const host=document.getElementById('funnel'); host.innerHTML='';
+  act().forEach(c=>{
+    const a=dayCity(c,cat); const max=a.tord||1;
+    const steps=[['Ordered',a.tord,'var(--seq-2)','var(--text-primary)'],
+                 ['Sent',a.tsent,'var(--seq-4)','#fff'],['Received',a.trecd,'var(--seq-6)','#fff']];
+    const d=document.createElement('div');
+    d.innerHTML=`<div class="city-h"><span>${CITY_LABEL[c]}</span><span class="rule"></span></div>
+      <div class="funnel">${steps.map(([l,v,col,ink])=>`<div class="fstep"><div class="flab">${l}</div>
+        <div><div class="ffill" style="width:${Math.max(v/max*100,2)}%;background:${col};color:${ink}">${fmt(v)}</div></div>
+      </div>`).join('')}</div>
+      <div class="kv" style="margin-top:9px">
+        <span class="pill">Ordered → Sent: <b style="color:var(--text-primary)">${fmt(a.tord-a.tsent)}</b> never dispatched</span>
+        <span class="pill">Sent → Received: <b style="color:var(--text-primary)">${fmt(a.tsent-a.trecd)}</b> not booked in</span>
+        <span class="pill">${fmt(a.open)} units on open orders (excluded)</span></div>`;
+    host.appendChild(d);
+  });
+}
+
+/* ---------- wiring ---------- */
+function renderAll(){ renderTiles(); renderCatCards(); renderTrend(); renderPatterns();
+  renderPods(); renderItems(); renderFunnel(); }
+const press=(id,on)=>document.getElementById(id).setAttribute('aria-pressed',on?'true':'false');
+document.getElementById('cityBLR').onclick=()=>{ if(cities.BLR&&!cities.NCR)return;
+  cities.BLR=!cities.BLR; press('cityBLR',cities.BLR); selPod=null; renderAll(); };
+document.getElementById('cityNCR').onclick=()=>{ if(cities.NCR&&!cities.BLR)return;
+  cities.NCR=!cities.NCR; press('cityNCR',cities.NCR); selPod=null; renderAll(); };
+document.getElementById('podSortShort').onclick=()=>{podSort='short';press('podSortShort',1);press('podSortFill',0);renderPods();};
+document.getElementById('podSortFill').onclick=()=>{podSort='fill';press('podSortShort',0);press('podSortFill',1);renderPods();};
+['fltAll','fltUneven','fltZero'].forEach((id,k)=>document.getElementById(id).onclick=()=>{
+  itemFilter=['all','uneven','zero'][k]; ['fltAll','fltUneven','fltZero'].forEach((x,j)=>press(x,j===k)); renderItems();});
+document.getElementById('q').addEventListener('input',e=>{query=e.target.value.trim();renderItems();});
+document.getElementById('themeBtn').onclick=e=>{
+  const dark=document.documentElement.getAttribute('data-theme')==='dark';
+  document.documentElement.setAttribute('data-theme',dark?'light':'dark');
+  e.target.textContent=dark?'Dark':'Light'; press('themeBtn',!dark); renderTrend(); };
+let rt; addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(renderTrend,150);});
+initControls(); renderAll();
+};
+
+/* =========================================================================
+   Screen wiring for uploads, stored data and rules
+   ========================================================================= */
+const $ = id => document.getElementById(id);
+let mounted = false;
+
+function say(msg, kind) {
+  const el = $("ingestMsg");
+  el.textContent = msg || "";
+  el.className = "ingest-msg" + (kind ? " " + kind : "");
+}
+
+function nfmt(n) { return Number(n).toLocaleString("en-IN"); }
+
+async function refreshStats() {
+  const lines = await idbAll("lines");
+  const dayCount = new Set(lines.map(r => r.day)).size;
+  const man = (await idbGet("meta", "files")) || { v: [] };
+  $("statLines").textContent = nfmt(lines.length);
+  $("statDays").textContent = nfmt(dayCount);
+  const dupes = findDuplicateIndents(lines);
+  $("statDupes").textContent = dupes.length
+    ? dupes.map(([k, n]) => `${k}  —  ${n} identical lines`).join("\n")
+    : "None found.";
+  $("statFiles").textContent = man.v.length
+    ? man.v.slice(0, 6).map(f => `${f.name.slice(0, 46)}${f.name.length > 46 ? "…" : ""} · ${nfmt(f.rows)} lines`).join("\n")
+    : "No files loaded yet.";
+  return lines;
+}
+
+async function rebuild(lines) {
+  lines = lines || await idbAll("lines");
+  if (!lines.length) {
+    document.body.classList.add("nodata");
+    say("Add one or more CSV exports to start. Lines are matched on Product Line Entry ID, so re-uploading an overlapping export never double counts.");
+    return;
+  }
+  const DATA = build(lines);
+  if (!DATA.dates.length) {
+    document.body.classList.add("nodata");
+    say("Those files loaded, but no line survived the rules. Check the status and city rules under Rules.", "bad");
+    return;
+  }
+  document.body.classList.remove("nodata");
+  if (mounted) { location.reload(); return; }
+  window.__mountDashboard(DATA);
+  mounted = true;
+}
+
+async function handleFiles(files) {
+  files = [...files].filter(f => /\.(csv|txt)$/i.test(f.name));
+  if (!files.length) { say("Pick the CSV export files — that is what this reads.", "bad"); return; }
+  $("ingestPanel").classList.add("busy");
+  try {
+    const rep = await ingestFiles(files, m => say(m));
+    await refreshStats();
+    const sk = rep.skipped.noCity + rep.skipped.noDate;
+    say(`Loaded ${nfmt(rep.added)} lines from ${rep.files.length} file${rep.files.length > 1 ? "s" : ""}.` +
+        (sk ? ` ${nfmt(sk)} lines skipped (${nfmt(rep.skipped.noCity)} unknown pod city, ${nfmt(rep.skipped.noDate)} no date).` : ""), "ok");
+    await rebuild();
+  } catch (e) {
+    say(e.message || String(e), "bad");
+  } finally {
+    $("ingestPanel").classList.remove("busy");
+  }
+}
+
+/* ---------- boot ---------- */
+(async function boot() {
+  await loadRules();
+  $("rulesBox").value = JSON.stringify(RULES, null, 2);
+
+  const drop = $("dropZone"), picker = $("filePicker");
+  picker.addEventListener("change", e => { handleFiles(e.target.files); picker.value = ""; });
+  drop.addEventListener("click", () => picker.click());
+  drop.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); picker.click(); } });
+  ["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => {
+    e.preventDefault(); drop.classList.add("over");
+  }));
+  ["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => {
+    e.preventDefault(); drop.classList.remove("over");
+  }));
+  drop.addEventListener("drop", e => handleFiles(e.dataTransfer.files));
+
+  $("rulesSave").onclick = async () => {
+    let v;
+    try { v = JSON.parse($("rulesBox").value); }
+    catch (err) { say("That is not valid JSON: " + err.message, "bad"); return; }
+    await saveRules(v);
+    await loadRules();
+    say("Rules saved. Rebuilding…");
+    location.reload();
+  };
+  $("rulesReset").onclick = async () => {
+    await saveRules(DEFAULT_RULES);
+    location.reload();
+  };
+  $("backupBtn").onclick = async () => {
+    const lines = await idbAll("lines");
+    const blob = new Blob([JSON.stringify({ rules: RULES, lines })], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `io-fill-rate-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  $("restoreFile").addEventListener("change", async e => {
+    const f = e.target.files[0]; if (!f) return;
+    try {
+      const j = JSON.parse(await f.text());
+      if (!Array.isArray(j.lines)) throw new Error("This backup has no lines in it.");
+      for (let i = 0; i < j.lines.length; i += 2000) await idbBulkPut(j.lines.slice(i, i + 2000));
+      if (j.rules) await saveRules(j.rules);
+      location.reload();
+    } catch (err) { say(err.message, "bad"); }
+    e.target.value = "";
+  });
+  $("clearBtn").onclick = async () => {
+    if (!confirm("Delete every stored line and start again?")) return;
+    await idbClear("lines");
+    await idbPut("meta", { k: "files", v: [] });
+    location.reload();
+  };
+
+  const lines = await refreshStats();
+  await rebuild(lines);
+})();
+
+</script>
+</body>
+</html>
