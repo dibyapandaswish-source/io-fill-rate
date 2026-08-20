@@ -1,346 +1,999 @@
-/**
- * Pod-wise fill rate / short supply pipeline — Munchmart (BLR & Delhi-NCR)
- *
- * This is a line-for-line TypeScript port of the Python pipeline.py that
- * produced the original dashboard. Keep this file and dash logic in sync —
- * if the date/status rules or the re-raise dedup ever change, they must
- * change in exactly one place (here), since both the browser (upload page)
- * and the server (nothing else needs it) use this same module.
- *
- * Date rules (report date D, previous day D-1):
- *   BLR   Production In-house / F&V -> D, except 7 night-dispatch CK RMs -> D-1
- *         all other categories -> D-1
- *   NCR   Production In-house / F&V -> D
- *         Dry RM -> D-1, except 4 GGN bakery items -> D
- *         all other categories -> D-1
- *   Rows with Internal Order Status = 'ordered' are excluded everywhere.
- *
- * A file's report date is the LATEST expected date it contains, which is how
- * the export behaves when pulled on day D. City is detected from the pod
- * code prefix, so file names never matter.
- *
- * Re-raise dedup (BLR + Production In-house only): RMs not handed over in
- * their original IO get re-raised as a fresh IO and dispatched in another
- * slot. Both line items (same item + pod) then survive in the export, which
- * double-counts Ordered even though only one of them was ever shipped. Drop
- * the never-shipped (sent==0) duplicate(s) whenever a sibling row for the
- * same item+pod DID ship something.
- */
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IO Fill Rate — pod-wise short supply</title>
+<style>
+:root{
+  --plane:#f9f9f7; --surface-1:#fcfcfb;
+  --text-primary:#0b0b0b; --text-secondary:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --baseline:#c3c2b7; --border:rgba(11,11,11,0.10);
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
+  --good:#0ca30c; --warning:#fab219; --critical:#d03b3b;
+  --seq-2:#9ec5f4; --seq-4:#3987e5; --seq-6:#184f95;
+  --ghost:rgba(11,11,11,0.045);
+}
+@media (prefers-color-scheme: dark){ :root:where(:not([data-theme="light"])){
+  --plane:#0d0d0d; --surface-1:#1a1a19;
+  --text-primary:#ffffff; --text-secondary:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --baseline:#383835; --border:rgba(255,255,255,0.10);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+  --seq-2:#184f95; --seq-4:#3987e5; --seq-6:#9ec5f4;
+  --ghost:rgba(255,255,255,0.06);
+}}
+:root[data-theme="dark"]{
+  --plane:#0d0d0d; --surface-1:#1a1a19;
+  --text-primary:#ffffff; --text-secondary:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --baseline:#383835; --border:rgba(255,255,255,0.10);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70;
+  --seq-2:#184f95; --seq-4:#3987e5; --seq-6:#9ec5f4;
+  --ghost:rgba(255,255,255,0.06);
+}
+*{box-sizing:border-box}
+.upl{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;
+  padding:11px 12px;margin:16px 0 0}
+.upl .uplrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.upl .hint{font-size:12.5px;color:var(--muted)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.chip-d{display:inline-flex;align-items:center;gap:7px;font-size:12px;
+  background:var(--plane);border:1px solid var(--border);border-radius:999px;padding:4px 5px 4px 11px}
+.chip-d b{font-weight:600}
+.chip-d .meta{color:var(--muted)}
+.chip-d .x{cursor:pointer;border:0;background:var(--ghost);color:var(--text-secondary);
+  width:18px;height:18px;border-radius:999px;font-size:13px;line-height:1;padding:0}
+.chip-d .x:hover{background:var(--critical);color:#fff}
+.uplmsg{font-size:12.5px;margin-top:8px}
+.uplmsg.ok{color:var(--text-secondary)}
+.uplmsg.bad{color:var(--critical)}
+.dropping{outline:2px dashed var(--s1);outline-offset:3px}
+body.nodata .bar,body.nodata section{display:none}
+body.nodata .upl{padding:26px 22px}
+body.nodata #emptyGuide{display:block}
+#emptyGuide{display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--grid);
+  font-size:12.5px;color:var(--text-secondary);max-width:86ch}
+#emptyGuide b{color:var(--text-primary)}
+#emptyGuide div{padding:2px 0}
+td.ion,.ion{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;
+  color:var(--text-secondary);white-space:nowrap;letter-spacing:-0.01em}
+body{margin:0;background:var(--plane);color:var(--text-primary);
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:14px;line-height:1.45}
+.wrap{max-width:1180px;margin:0 auto;padding:24px 20px 64px}
+header.top{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;justify-content:space-between}
+h1{font-size:21px;margin:0 0 2px;letter-spacing:-0.01em}
+.sub{color:var(--text-secondary);font-size:12.5px;margin:0}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:16px 0 0;
+  background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:10px 12px;
+  position:sticky;top:0;z-index:20}
+.bar .lab{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-right:2px}
+.bar .sep{width:1px;height:22px;background:var(--grid);margin:0 4px}
+button.ctl,select.ctl{font:inherit;font-size:13px;padding:6px 11px;border-radius:8px;cursor:pointer;
+  background:var(--plane);color:var(--text-primary);border:1px solid var(--border)}
+button.ctl[aria-pressed="true"]{background:var(--text-primary);color:var(--surface-1);border-color:var(--text-primary)}
+button.ctl:hover:not([aria-pressed="true"]){background:var(--ghost)}
+section{background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:20px;margin-top:16px}
+h2{font-size:15px;margin:0 0 3px;letter-spacing:-0.005em}
+.note{color:var(--text-secondary);font-size:12.5px;margin:0 0 15px;max-width:80ch}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(166px,1fr));gap:12px}
+.tile{border:1px solid var(--border);border-radius:11px;padding:13px 14px}
+.tile .lab{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:6px}
+.tile .val{font-size:25px;font-weight:600;letter-spacing:-0.02em;line-height:1.05}
+.tile .foot{font-size:12px;color:var(--text-secondary);margin-top:5px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;
+  padding:2px 8px;border-radius:999px;border:1px solid var(--border);white-space:nowrap}
+.chip svg{width:11px;height:11px;flex:none}
+.city-h{display:flex;align-items:center;gap:9px;margin:20px 0 10px;font-size:13px;font-weight:650;color:var(--text-secondary)}
+.city-h:first-child{margin-top:2px}
+.city-h .rule{flex:1;height:1px;background:var(--grid)}
+.legend{display:flex;gap:15px;flex-wrap:wrap;margin:0 0 12px;font-size:12.5px;color:var(--text-secondary)}
+.legend .k{display:inline-flex;align-items:center;gap:6px}
+.sw{width:10px;height:10px;border-radius:3px;flex:none}
+.stack{display:flex;height:28px;border-radius:4px;gap:2px}
+.stackrow{margin-bottom:8px}
+.stacklab{display:flex;justify-content:space-between;font-size:12px;color:var(--text-secondary);margin-bottom:5px}
+.bars{display:flex;flex-direction:column;gap:3px}
+.brow{display:grid;grid-template-columns:118px 1fr 156px;gap:10px;align-items:center;padding:2px 4px;border-radius:6px;cursor:pointer}
+.brow:hover{background:var(--ghost)}
+.brow.sel{background:var(--ghost);outline:1px solid var(--border)}
+.bname{font-size:12px;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btrack{height:15px}
+.bfill{height:15px;border-radius:0 4px 4px 0;background:var(--s1)}
+.bmeta{font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.bmeta b{color:var(--text-primary);font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
+  font-weight:600;padding:7px 8px;border-bottom:1px solid var(--grid);white-space:nowrap}
+td{padding:7px 8px;border-bottom:1px solid var(--grid);vertical-align:middle}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.itemrow{cursor:pointer}
+tr.itemrow:hover>td{background:var(--ghost)}
+tr.podrow td{font-size:12.5px;color:var(--text-secondary);background:var(--ghost)}
+tr.podrow td:first-child{padding-left:26px}
+.mini{display:inline-flex;gap:1.5px;align-items:flex-end;height:14px}
+.mini i{width:3px;background:var(--s1);border-radius:1px 1px 0 0;display:block}
+.mini i.z{background:var(--critical)}
+.pill{font-size:11px;padding:1.5px 7px;border-radius:999px;border:1px solid var(--border);color:var(--text-secondary);white-space:nowrap}
+.tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+input[type=search]{font:inherit;font-size:13px;padding:6px 10px;border-radius:8px;
+  border:1px solid var(--border);background:var(--plane);color:var(--text-primary);min-width:190px}
+.funnel{display:flex;flex-direction:column;gap:8px;max-width:620px}
+.fstep{display:grid;grid-template-columns:74px 1fr;gap:10px;align-items:center}
+.flab{font-size:12px;color:var(--text-secondary)}
+.ffill{height:25px;border-radius:0 4px 4px 0;display:flex;align-items:center;padding-left:9px;
+  font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums}
+.tip{position:fixed;pointer-events:none;z-index:60;background:var(--text-primary);color:var(--surface-1);
+  font-size:12px;padding:7px 9px;border-radius:7px;opacity:0;transition:opacity .09s;max-width:300px;
+  box-shadow:0 4px 14px rgba(0,0,0,.18);font-variant-numeric:tabular-nums}
+.foothint{font-size:12px;color:var(--muted);margin-top:12px}
+.kv{display:flex;gap:5px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap}
+.drill{margin-top:14px;border-top:1px solid var(--grid);padding-top:14px}
+.drill h3{font-size:13px;margin:0 0 8px}
+.chartbox{width:100%}
+svg text{font-family:inherit}
+.catgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}
+.catcard{border:1px solid var(--border);border-radius:11px;padding:12px 13px;cursor:pointer}
+.catcard:hover{background:var(--ghost)}
+.catcard .cn{font-size:13px;font-weight:600;margin-bottom:2px}
+.catcard .cf{font-size:20px;font-weight:600;letter-spacing:-0.02em}
+.catcard .cd{font-size:12px;color:var(--text-secondary);margin-top:3px}
+.meter{height:6px;border-radius:3px;background:var(--grid);margin-top:8px;overflow:hidden}
+.meter i{display:block;height:6px;border-radius:3px}
+@media(max-width:640px){ .brow{grid-template-columns:92px 1fr 126px} .tile .val{font-size:21px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div>
+    <h1>IO Fill Rate — pod-wise short supply</h1>
+    <p class="sub">Ordered → Sent → Received by pod, item and category · BLR &amp; Delhi-NCR (GGN+NOI+DEL+GZB) · same date &amp; status rules as the IO Fill Rate Log</p>
+  </div>
+  <button class="ctl" id="themeBtn" aria-pressed="false">Dark</button>
+</header>
 
-import Papa from 'papaparse';
+<div class="upl" id="upl">
+  <div class="uplrow">
+    <button class="ctl" id="addFiles">Add export files</button>
+    <span class="hint">or drop CSVs anywhere on this page &middot; files sharing a report date are combined</span>
+    <span class="sep"></span>
+    <button class="ctl" id="resetData">Clear all</button>
+    <input type="file" id="fileInput" accept=".csv,text/csv" multiple hidden>
+  </div>
+  <div class="chips" id="dateChips"></div>
+  <div class="uplmsg ok" id="uplMsg"></div>
+  <div id="emptyGuide">
+    <div><b>What to upload</b> — the Internal Order Products By Line Entry report, exported as CSV. One file per city per report date; drop them all in together.</div>
+    <div><b>Report date</b> is read from the latest expected date inside each file, so filenames are ignored. City comes from the pod prefix — GGN, NOI, DEL and GZB are Delhi-NCR, everything else is BLR.</div>
+    <div><b>Date rules</b> — BLR Production In-house and F&amp;V read the report date, except the 7 night-dispatch CK RMs which read the previous day. Delhi-NCR Production In-house and F&amp;V read the report date, and Dry RM reads the previous day except the 4 GGN bakery items. All other categories read the previous day.</div>
+    <div><b>Excluded</b> — lines still at status <code>ordered</code>. BLR Production In-house re-raises are de-duplicated so a never-shipped repeat of a shipped line does not double-count Ordered.</div>
+  </div>
+</div>
 
-export const NIGHT = [
-  'Red Masala (CK)', 'Podi (CK)', 'Black Masala (CK)', 'Bhel Puri Mixture (CK)',
-  'Masala Peanut (CK)', 'Papdi (CK)', 'Poha Mixture (CK)',
-];
-export const BAKERY = [
-  'Brioche Bun 4" - GGN', 'Mumbai Pav - GGN', 'Sandwich Bread - GGN', 'Tutti Frutti Bun - GGN',
-];
-export const TODAY_CATS = ['Production In-house', 'F&V'];
-export const TERMINAL = ['closed', 'received', 'force_closed'];
-export const CAT_ORDER = [
-  'Production In-house', 'Dry RM', 'Packaging', 'Sauces And Syrups', 'Beverage',
-  'F&V', 'Chilled & Frozen', 'Desserts',
-];
-export const NCR_PREFIX = ['GGN', 'NOI', 'DEL', 'GZB'];
+<div class="bar">
+  <span class="lab">Date</span>
+  <select class="ctl" id="dateSel"></select>
+  <span class="sep"></span>
+  <span class="lab">City</span>
+  <button class="ctl" id="cityBLR" aria-pressed="true">BLR</button>
+  <button class="ctl" id="cityNCR" aria-pressed="true">Delhi-NCR</button>
+  <span class="sep"></span>
+  <span class="lab">Category</span>
+  <select class="ctl" id="catSel"></select>
+</div>
 
-export type City = 'BLR' | 'NCR';
+<section>
+  <h2 id="glanceH">At a glance</h2>
+  <p class="note">Fill rate is Sent ÷ Ordered, identical to the daily log. <b>Short units</b> is the gross shortfall felt at pod level — every pod's own shortfall added up, so an over-send to one pod never hides a starved pod elsewhere.</p>
+  <div id="tiles"></div>
+</section>
 
-export interface Row {
-  item: string;
-  cat: string;
-  uom: string;
-  pod: string;
-  status: string;
-  exp: string; // dd-mm-yyyy
-  io: string;
-  ord: number;
-  sent: number;
-  recd: number;
-  city: City;
+<section>
+  <h2>Every category, this date</h2>
+  <p class="note">Click any card to filter the whole dashboard to that category.</p>
+  <div id="catcards"></div>
+</section>
+
+<section>
+  <h2>Day-wise trend</h2>
+  <p class="note">Fill rate and gross short units by report date for the selected category. Hover for the exact day.</p>
+  <div class="legend" id="trendLegend"></div>
+  <div class="chartbox" id="chartFill"></div>
+  <div class="chartbox" id="chartShort" style="margin-top:6px"></div>
+</section>
+
+<section>
+  <h2>Was the cut shared, or did some pods get starved?</h2>
+  <p class="note">Each short item is classified by how the available quantity was split across the pods that ordered it. <b>Pro-rata cut</b> — everyone took a similar percentage hit (a production/supply problem). <b>Uneven</b> — some pods served in full while others got zero or near-zero (an allocation problem). <b>Total stock-out</b> — nothing sent to anyone.</p>
+  <div class="legend">
+    <span class="k"><span class="sw" style="background:var(--s1)"></span>Pro-rata cut</span>
+    <span class="k"><span class="sw" style="background:var(--s2)"></span>Uneven allocation</span>
+    <span class="k"><span class="sw" style="background:var(--s3)"></span>Total stock-out</span>
+  </div>
+  <div id="patterns"></div>
+</section>
+
+<section>
+  <h2>Which pods absorbed the hit</h2>
+  <p class="note">Ranked by gross short units for the selected date and category. Click a pod to see the lines it was short on, with the internal order each line sits on.</p>
+  <div class="tools">
+    <button class="ctl" id="podSortShort" aria-pressed="true">Sort by short units</button>
+    <button class="ctl" id="podSortFill" aria-pressed="false">Sort by fill %</button>
+  </div>
+  <div id="podbars"></div>
+  <div id="poddrill"></div>
+</section>
+
+<section>
+  <h2>Item → pod bifurcation</h2>
+  <p class="note">Every item ordered this date, biggest gross shortfall first (fully-supplied items sort to the bottom). Click a row for the pod-level split of what was actually sent. Mini bars are each pod's fill % — red means that pod received nothing.</p>
+  <div class="tools">
+    <input type="search" id="q" placeholder="Search item, pod, or IO number…" aria-label="Search item, pod, or IO number">
+    <button class="ctl" id="fltAll" aria-pressed="true">All patterns</button>
+    <button class="ctl" id="fltShort" aria-pressed="false">Short-supplied only</button>
+    <button class="ctl" id="fltUneven" aria-pressed="false">Uneven only</button>
+    <button class="ctl" id="fltZero" aria-pressed="false">Has zero-supplied pods</button>
+  </div>
+  <div style="overflow-x:auto"><table id="itemtbl"><thead><tr>
+    <th>Item</th><th>Category</th><th>IO number</th><th class="n">Ordered</th><th class="n">Sent</th><th class="n">Received</th>
+    <th class="n">Short</th><th class="n">Fill %</th><th class="n">Pods</th><th class="n">Zero</th>
+    <th>Spread</th><th>Pattern</th></tr></thead><tbody></tbody></table></div>
+  <p class="foothint" id="itemcount"></p>
+</section>
+
+<section>
+  <h2>Ordered → Sent → Received</h2>
+  <p class="note">Limited to internal orders that reached a terminal status (closed / received / force_closed) so the received leg is comparable — orders still <i>confirmed</i> or <i>sent</i> simply have not been booked in yet and would read as a false loss. Sent → Received is quantity that left the warehouse but was never GRN'd at the pod.</p>
+  <div id="funnel"></div>
+</section>
+
+<p class="foothint">Source: daily internal order exports. Rows with Internal Order Status = <code>ordered</code> excluded. BLR Production In-house / F&amp;V read the report date except the 7 night-dispatch CK RMs (previous day); Delhi-NCR Dry RM reads the previous day except the 4 GGN bakery items (report date); all other categories read the previous day.</p>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+let DATA = {dates:[],detail_dates:[],trend:[],detail:{},cat_order:['Production In-house','Dry RM','Packaging','Sauces And Syrups','Beverage','F&V','Chilled & Frozen','Desserts'],schema:{pod_cat:['city','cat','pod','ord','sent','recd','short','zero_items','sub70'],cat:['city','cat','ord','sent','recd','short','items','pods','t_ord','t_sent','t_recd','open_ord']}};
+const CITY_LABEL = {BLR:'BLR', NCR:'Delhi-NCR (GGN+NOI+DEL)'};
+const CITY_SHORT = {BLR:'BLR', NCR:'Delhi-NCR'};
+const CITY_COLOR = {BLR:'var(--s1)', NCR:'var(--s2)'};
+const T = {DATE:0, CITY:1, CAT:2, ORD:3, SENT:4, RECD:5, SHORT:6, ITEMS:7, PODS:8,
+           TORD:9, TSENT:10, TRECD:11, OPEN:12};
+
+let date = null;
+let cities = {BLR:true, NCR:true};
+let cat = 'ALL', podSort='short', itemFilter='all', query='', selPod=null;
+let openItems = new Set();
+
+const fmt = n => (Math.round(n*100)/100).toLocaleString('en-IN');
+const pct = v => (v==null||isNaN(v)) ? '—' : (v*100).toFixed(1)+'%';
+const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const act = () => ['BLR','NCR'].filter(c=>cities[c]);
+const det = () => DATA.detail[date] || null;
+const hasDetail = () => !!DATA.detail[date];
+
+const ICON = {
+  good:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M6.2 11.4 3 8.2l1.1-1.1 2.1 2.1 5-5L12.3 5.3z"/></svg>',
+  warning:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6 15 14H1zM7.2 6h1.6v4H7.2zm0 5h1.6v1.6H7.2z"/></svg>',
+  critical:'<svg viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="7"/><path d="M7.2 4h1.6v5H7.2zm0 6h1.6v1.6H7.2z" fill="var(--surface-1)"/></svg>'};
+const flagOf = f => f>=0.95?{k:'good',t:'OK'}:f>=0.85?{k:'warning',t:'Watch'}:{k:'critical',t:'Check'};
+const chip = f => {const x=flagOf(f); return `<span class="chip" style="color:var(--${x.k})">${ICON[x.k]}${x.t}</span>`;};
+
+/* ---------- tooltip ---------- */
+const tipEl = document.getElementById('tip');
+function showTip(e,html){
+  tipEl.innerHTML=html; tipEl.style.opacity=1;
+  const r=tipEl.getBoundingClientRect();
+  let x=e.clientX+14, y=e.clientY+14;
+  if(x+r.width>innerWidth-8) x=e.clientX-r.width-12;
+  if(y+r.height>innerHeight-8) y=e.clientY-r.height-12;
+  tipEl.style.left=x+'px'; tipEl.style.top=y+'px';
+}
+const hideTip = ()=> tipEl.style.opacity=0;
+function bindTip(el,html){
+  el.addEventListener('mousemove',e=>showTip(e,html));
+  el.addEventListener('mouseleave',hideTip);
 }
 
-interface RuleRow extends Row {
-  short: number;
-  terminal: boolean;
+/* ---------- data helpers ---------- */
+function trendFor(city,category){
+  const out={};
+  DATA.trend.forEach(r=>{
+    if(r[T.CITY]!==city) return;
+    if(category!=='ALL' && r[T.CAT]!==category) return;
+    const d=r[T.DATE];
+    const o=out[d]||(out[d]={ord:0,sent:0,recd:0,short:0,tord:0,tsent:0,trecd:0,open:0});
+    o.ord+=r[T.ORD]; o.sent+=r[T.SENT]; o.recd+=r[T.RECD]; o.short+=r[T.SHORT];
+    o.tord+=r[T.TORD]; o.tsent+=r[T.TSENT]; o.trecd+=r[T.TRECD]; o.open+=r[T.OPEN];
+  });
+  return DATA.dates.map(d=>({date:d, ...(out[d]||{ord:0,sent:0,recd:0,short:0,tord:0,tsent:0,trecd:0,open:0})}));
+}
+function dayCity(city,category){
+  const rows = DATA.trend.filter(r=>r[T.DATE]===date && r[T.CITY]===city
+      && (category==='ALL'||r[T.CAT]===category));
+  const a={ord:0,sent:0,recd:0,short:0,items:0,tord:0,tsent:0,trecd:0,open:0,pods:0};
+  rows.forEach(r=>{a.ord+=r[T.ORD];a.sent+=r[T.SENT];a.recd+=r[T.RECD];a.short+=r[T.SHORT];
+    a.items+=r[T.ITEMS];a.tord+=r[T.TORD];a.tsent+=r[T.TSENT];a.trecd+=r[T.TRECD];a.open+=r[T.OPEN];
+    a.pods=Math.max(a.pods,r[T.PODS]);});
+  return a;
+}
+function podRows(){
+  const d=det(); if(!d) return [];
+  const m={};
+  d.pod_cat.forEach(r=>{
+    const [c,g,pi,o,s,rc,sh,zi,s7]=r;
+    if(!cities[c]) return; if(cat!=='ALL'&&g!==cat) return;
+    const k=c+'|'+pi, x=m[k]||(m[k]={city:c,pod:d.pods[pi],ord:0,sent:0,recd:0,short:0,zi:0,s7:0});
+    x.ord+=o; x.sent+=s; x.recd+=rc; x.short+=sh; x.zi+=zi; x.s7+=s7;
+  });
+  return Object.values(m).filter(x=>x.ord>0).map(x=>({...x,fill:x.sent/x.ord}));
+}
+function itemsFor(){
+  const d=det(); if(!d) return [];
+  return d.items.filter(i=>cities[i.c] && (cat==='ALL'||i.g===cat));
 }
 
-export interface Agg {
-  date: string;
-  pods: string[];
-  pod_cat: Array<[City, string, number, number, number, number, number, number, number]>;
-  items: Array<{
-    c: City; g: string; i: string; u: string;
-    o: number; s: number; r: number; sh: number; f: number; np: number;
-    z: number; fp: number; sp: number; p: string;
-    pr?: Array<[number, number, number, number]>;
-  }>;
-  cat: Array<[City, string, number, number, number, number, number, number, number, number, number, number]>;
-  schema: { pod_cat: string[]; cat: string[] };
+/* ---------- controls ---------- */
+function initControls(){
+  const ds=document.getElementById('dateSel');
+  ds.innerHTML = DATA.dates.slice().reverse().map(d=>
+    `<option value="${d}"${d===date?' selected':''}>${d}${DATA.detail[d]?'':' (summary only)'}</option>`).join('');
+  ds.onchange = e=>{ date=e.target.value; selPod=null; openItems.clear(); renderAll(); };
+  const cs=document.getElementById('catSel');
+  cs.innerHTML = `<option value="ALL">All categories</option>` +
+    DATA.cat_order.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  cs.onchange = e=>{ cat=e.target.value; selPod=null; openItems.clear(); renderAll(); };
+}
+function setCat(c){ cat=c; document.getElementById('catSel').value=c; selPod=null; openItems.clear(); renderAll(); }
+
+/* ---------- tiles ---------- */
+function renderTiles(){
+  document.getElementById('glanceH').textContent =
+    `At a glance — ${date}${cat==='ALL'?'':' · '+cat}`;
+  const host=document.getElementById('tiles'); host.innerHTML='';
+  act().forEach(c=>{
+    const a=dayCity(c,cat);
+    const items=itemsFor().filter(i=>i.c===c);
+    const shortItems=items.filter(i=>i.f<0.995).length;
+    const zeroLines=items.reduce((n,i)=>n+i.z,0);
+    const gap=a.tsent-a.trecd;
+    const h=document.createElement('div'); h.className='city-h';
+    h.innerHTML=`<span>${CITY_LABEL[c]}</span><span class="rule"></span>`;
+    host.appendChild(h);
+    const g=document.createElement('div'); g.className='tiles';
+    const fill=a.ord?a.sent/a.ord:NaN;
+    g.innerHTML=[
+      ['Fill rate',pct(fill),`${fmt(a.ord)} ordered → ${fmt(a.sent)} sent`,fill],
+      ['Gross short units',fmt(a.short),hasDetail()?`${shortItems} items short · ${zeroLines} pod-lines at zero`:'item detail not retained for this date',null],
+      ['Items ordered',fmt(a.items),`across ${a.pods} pods`,null],
+      ['Sent → Received gap',fmt(gap),`${pct(a.tsent?gap/a.tsent:NaN)} of dispatched, terminal orders only`,null]
+    ].map(([l,v,f,fl])=>`<div class="tile"><div class="lab">${l}</div><div class="val">${v}</div>
+       <div class="foot">${fl!=null&&!isNaN(fl)?chip(fl)+' ':''}${f}</div></div>`).join('');
+    host.appendChild(g);
+  });
 }
 
-export interface Payload {
-  dates: string[];
-  detail_dates: string[];
-  trend: any[];
-  detail: Record<string, Agg>;
-  cat_order: string[];
-  schema: { pod_cat: string[]; cat: string[] };
+/* ---------- category cards ---------- */
+function renderCatCards(){
+  const host=document.getElementById('catcards');
+  const rows=DATA.trend.filter(r=>r[T.DATE]===date && cities[r[T.CITY]]);
+  const m={};
+  rows.forEach(r=>{const x=m[r[T.CAT]]||(m[r[T.CAT]]={ord:0,sent:0,short:0});
+    x.ord+=r[T.ORD]; x.sent+=r[T.SENT]; x.short+=r[T.SHORT];});
+  const order=DATA.cat_order.filter(c=>m[c]);
+  host.innerHTML=`<div class="catgrid">${order.map(c=>{
+    const x=m[c], f=x.ord?x.sent/x.ord:NaN, fl=flagOf(f);
+    return `<div class="catcard" data-c="${esc(c)}"${cat===c?' style="outline:1px solid var(--border);background:var(--ghost)"':''}>
+      <div class="cn">${esc(c)}</div>
+      <div class="cf">${pct(f)} <span style="font-size:12px;font-weight:500;color:var(--${fl.k})">${fl.t}</span></div>
+      <div class="cd">${fmt(x.ord)} ordered · <b style="color:var(--text-primary)">${fmt(x.short)}</b> short</div>
+      <div class="meter"><i style="width:${Math.min(f*100,100)}%;background:var(--${fl.k})"></i></div>
+    </div>`;}).join('')}</div>`;
+  host.querySelectorAll('.catcard').forEach(el=>{
+    el.onclick=()=>setCat(cat===el.dataset.c?'ALL':el.dataset.c);
+  });
 }
 
-// ---------------------------------------------------------------- helpers
-
-function r2(x: number): number {
-  return Math.round(x * 100) / 100;
+/* ---------- charts ---------- */
+function lineChart(host,series,fmtY,title){
+  const W=host.clientWidth||900, H=190, L=48, R=94, TP=14, B=30;
+  const dates=DATA.dates, n=dates.length;
+  const all=series.flatMap(s=>s.pts.filter(v=>v!=null));
+  if(!all.length){ host.innerHTML=''; return; }
+  let lo=Math.min(...all), hi=Math.max(...all);
+  if(lo===hi){lo-=0.05;hi+=0.05;}
+  const pad=(hi-lo)*0.14; lo=Math.max(0,lo-pad); hi=hi+pad;
+  const X=i=> n===1 ? L+(W-L-R)/2 : L+i*(W-L-R)/(n-1);
+  const Y=v=> TP+(hi-v)/(hi-lo)*(H-TP-B);
+  const ticks=4, gy=[...Array(ticks+1)].map((_,k)=>lo+(hi-lo)*k/ticks);
+  const step=Math.max(1,Math.ceil(n/9));
+  let s=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${title}">`;
+  gy.forEach(v=>{s+=`<line x1="${L}" x2="${W-R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>
+    <text x="${L-8}" y="${(Y(v)+4).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--muted)">${fmtY(v)}</text>`;});
+  dates.forEach((d,i)=>{ if(i%step===0||i===n-1)
+    s+=`<text x="${X(i).toFixed(1)}" y="${H-10}" text-anchor="middle" font-size="11" fill="var(--muted)">${d.slice(0,5)}</text>`;});
+  series.forEach(se=>{
+    const segs=[]; let cur=[];
+    se.pts.forEach((v,i)=>{ if(v==null){ if(cur.length)segs.push(cur); cur=[]; } else cur.push([X(i),Y(v)]); });
+    if(cur.length)segs.push(cur);
+    segs.forEach(pp=>{ s+=`<path d="M${pp.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join('L')}" fill="none"
+      stroke="${se.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+      pp.forEach(p=>{s+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.2" fill="${se.color}" stroke="var(--surface-1)" stroke-width="2"/>`;});
+    });
+    const li=se.pts.map((v,i)=>v==null?-1:i).filter(i=>i>=0).pop();
+    if(li>=0) s+=`<text x="${(X(li)+9).toFixed(1)}" y="${(Y(se.pts[li])+4).toFixed(1)}" font-size="11.5"
+      font-weight="600" fill="var(--text-secondary)">${se.name}</text>`;
+  });
+  s+=`<line id="ch" x1="0" x2="0" y1="${TP}" y2="${H-B}" stroke="var(--baseline)" stroke-width="1" opacity="0"/>`;
+  s+=`<rect x="${L}" y="${TP}" width="${Math.max(W-L-R,1)}" height="${H-TP-B}" fill="transparent" id="hit"/></svg>`;
+  host.innerHTML=s;
+  const svg=host.querySelector('svg'), ch=svg.querySelector('#ch');
+  svg.querySelector('#hit').addEventListener('mousemove',e=>{
+    const bb=svg.getBoundingClientRect();
+    const i=n===1?0:Math.max(0,Math.min(n-1,Math.round((e.clientX-bb.left-L)/((W-L-R)/(n-1)))));
+    ch.setAttribute('x1',X(i)); ch.setAttribute('x2',X(i)); ch.setAttribute('opacity','1');
+    showTip(e,`<b>${dates[i]}</b><br>`+series.map(se=>
+      `${se.name}: <b>${se.pts[i]==null?'—':fmtY(se.pts[i])}</b>`).join('<br>'));
+  });
+  svg.querySelector('#hit').addEventListener('mouseleave',()=>{ch.setAttribute('opacity','0');hideTip();});
+}
+function barChart(host,series,title){
+  const W=host.clientWidth||900, H=150, L=70, R=94, TP=12, B=30;
+  const dates=DATA.dates, n=dates.length, k=series.length;
+  const hi=Math.max(1,...series.flatMap(s=>s.pts.map(v=>v||0)));
+  const bw=Math.max(2,Math.min(22,((W-L-R)/n)/k-2));
+  const X=i=> L+(i+0.5)*(W-L-R)/n;
+  const Y=v=> TP+(1-v/hi)*(H-TP-B);
+  const ticks=3, gy=[...Array(ticks+1)].map((_,j)=>hi*j/ticks);
+  const step=Math.max(1,Math.ceil(n/9));
+  let s=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${title}">`;
+  gy.forEach(v=>{s+=`<line x1="${L}" x2="${W-R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="var(--grid)" stroke-width="1"/>
+    <text x="${L-8}" y="${(Y(v)+4).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--muted)">${fmt(Math.round(v))}</text>`;});
+  dates.forEach((d,i)=>{ if(i%step===0||i===n-1)
+    s+=`<text x="${X(i).toFixed(1)}" y="${H-10}" text-anchor="middle" font-size="11" fill="var(--muted)">${d.slice(0,5)}</text>`;});
+  dates.forEach((d,i)=>{
+    series.forEach((se,j)=>{
+      const v=se.pts[i]||0; if(v<=0) return;
+      const x=X(i)-(k*(bw+2)-2)/2+j*(bw+2), y=Y(v);
+      s+=`<rect class="bk" data-i="${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}"
+        height="${Math.max(H-B-y,1).toFixed(1)}" rx="3" fill="${se.color}"/>`;
+    });
+  });
+  s+=`<line x1="${L}" x2="${W-R}" y1="${H-B}" y2="${H-B}" stroke="var(--baseline)" stroke-width="1"/></svg>`;
+  host.innerHTML=s;
+  host.querySelectorAll('.bk').forEach(r=>{
+    const i=+r.dataset.i;
+    bindTip(r,`<b>${dates[i]}</b><br>`+series.map(se=>`${se.name}: <b>${fmt(se.pts[i]||0)}</b> short`).join('<br>'));
+  });
+}
+function renderTrend(){
+  const ser=act().map(c=>({name:CITY_SHORT[c],color:CITY_COLOR[c],city:c,rows:trendFor(c,cat)}));
+  document.getElementById('trendLegend').innerHTML = ser.map(s=>
+    `<span class="k"><span class="sw" style="background:${s.color}"></span>${s.name}</span>`).join('')
+    + `<span style="color:var(--muted)">${cat==='ALL'?'all categories':esc(cat)}</span>`;
+  lineChart(document.getElementById('chartFill'),
+    ser.map(s=>({name:s.name,color:s.color,pts:s.rows.map(r=>r.ord?r.sent/r.ord:null)})),
+    v=>(v*100).toFixed(0)+'%','Fill rate by date');
+  barChart(document.getElementById('chartShort'),
+    ser.map(s=>({name:s.name,color:s.color,pts:s.rows.map(r=>r.short)})),'Gross short units by date');
 }
 
-function toNum(v: unknown): number {
-  const n = typeof v === 'string' ? parseFloat(v) : Number(v);
-  return Number.isFinite(n) ? n : 0;
+/* ---------- patterns ---------- */
+function renderPatterns(){
+  const host=document.getElementById('patterns');
+  if(!hasDetail()){ host.innerHTML='<p class="note">Item-level detail is not retained for this date.</p>'; return; }
+  const colors={'pro-rata cut':'var(--s1)','uneven':'var(--s2)','total stock-out':'var(--s3)','single pod':'var(--muted)'};
+  const order=['pro-rata cut','uneven','total stock-out','single pod'];
+  const rows=act().map(c=>{
+    const it=itemsFor().filter(i=>i.c===c && i.sh>0);
+    const m={}; it.forEach(i=>{const x=m[i.p]||(m[i.p]={n:0,short:0}); x.n++; x.short+=i.sh;});
+    return {city:c, ps:order.filter(p=>m[p]).map(p=>({pattern:p,...m[p]})), tot:it.reduce((a,b)=>a+b.sh,0)};
+  });
+  const max=Math.max(...rows.map(r=>r.tot),1);
+  host.innerHTML='';
+  rows.forEach(r=>{
+    const d=document.createElement('div'); d.className='stackrow';
+    d.innerHTML=`<div class="stacklab"><b style="color:var(--text-primary)">${CITY_LABEL[r.city]}</b>
+        <span>${fmt(r.tot)} short units</span></div>
+      <div class="stack" style="width:${Math.max(r.tot/max*100,0.5)}%">${r.ps.map(p=>
+        `<div data-t="${esc(p.pattern)}|${p.n}|${fmt(p.short)}" style="background:${colors[p.pattern]};
+          width:${p.short/r.tot*100}%;border-radius:3px"></div>`).join('')}</div>
+      <div class="kv" style="margin-top:6px">${r.ps.map(p=>
+        `<span class="pill">${esc(p.pattern)}: <b style="color:var(--text-primary)">${fmt(p.short)}</b> · ${p.n} items</span>`).join('')}</div>`;
+    host.appendChild(d);
+    d.querySelectorAll('.stack > div').forEach(sg=>{
+      const [p,n,sh]=sg.dataset.t.split('|');
+      bindTip(sg,`<b>${esc(p)}</b><br>${n} items · ${sh} short units`);
+    });
+  });
 }
 
-/** 'dd-mm-yyyy' -> sortable 'yyyy-mm-dd' */
-export function dkey(s: string): string {
-  const [dd, mm, yy] = s.split('-');
-  return `${yy}-${mm}-${dd}`;
+/* ---------- pods ---------- */
+function renderPods(){
+  const host=document.getElementById('podbars');
+  if(!hasDetail()){ host.innerHTML='<p class="note">Pod-level detail is not retained for this date.</p>';
+    document.getElementById('poddrill').innerHTML=''; return; }
+  let rows=podRows();
+  rows.sort(podSort==='short'?(a,b)=>b.short-a.short:(a,b)=>a.fill-b.fill);
+  const max=Math.max(...rows.map(r=>r.short),1);
+  host.innerHTML=`<div class="bars">${rows.map(r=>`
+    <div class="brow${selPod===r.city+'|'+r.pod?' sel':''}" data-k="${esc(r.city+'|'+r.pod)}">
+      <div class="bname" title="${esc(r.pod)}">${esc(r.pod)}</div>
+      <div class="btrack"><div class="bfill" style="width:${Math.max(r.short/max*100,0.4)}%"></div></div>
+      <div class="bmeta"><b>${fmt(r.short)}</b> short · ${pct(r.fill)}</div></div>`).join('')}</div>`;
+  host.querySelectorAll('.brow').forEach(el=>{
+    const r=rows.find(x=>x.city+'|'+x.pod===el.dataset.k);
+    bindTip(el,`<b>${esc(r.pod)}</b> · ${CITY_SHORT[r.city]}<br>Ordered ${fmt(r.ord)} → Sent ${fmt(r.sent)} → Received ${fmt(r.recd)}<br>
+      Short <b>${fmt(r.short)}</b> · fill ${pct(r.fill)}<br>${r.zi} items at zero · ${r.s7} items below 70%`);
+    el.onclick=()=>{ selPod = selPod===el.dataset.k?null:el.dataset.k; renderPods(); };
+  });
+  renderPodDrill();
+}
+function renderPodDrill(){
+  const host=document.getElementById('poddrill');
+  if(!selPod||!hasDetail()){ host.innerHTML=''; return; }
+  const d=det(), [city,pod]=selPod.split('|'), pi=d.pods.indexOf(pod);
+  const lines=[];
+  itemsFor().filter(i=>i.c===city && i.pr).forEach(i=>{
+    i.pr.forEach(p=>{ if(p[0]!==pi) return;
+      const sh=Math.max(p[1]-p[2],0); if(sh<=0) return;
+      lines.push({item:i.i,cat:i.g,uom:i.u,io:p[4]||'',ord:p[1],sent:p[2],recd:p[3],short:sh,fill:p[1]?p[2]/p[1]:null});
+    });
+  });
+  lines.sort((a,b)=>b.short-a.short);
+  host.innerHTML=`<div class="drill"><h3>${esc(pod)} — short lines${cat==='ALL'?'':' · '+esc(cat)} (${lines.length})</h3>
+    ${lines.length?`<div style="overflow-x:auto"><table><thead><tr><th>Item</th><th>Category</th><th>IO number</th>
+      <th class="n">Ordered</th><th class="n">Sent</th><th class="n">Received</th><th class="n">Short</th><th class="n">Fill %</th>
+      </tr></thead><tbody>${lines.slice(0,40).map(l=>`<tr><td>${esc(l.item)}</td>
+      <td style="font-size:12.5px;color:var(--text-secondary);white-space:nowrap">${esc(l.cat)}</td>
+      <td class="ion">${l.io?esc(l.io):'—'}</td>
+      <td class="n">${fmt(l.ord)}</td><td class="n">${fmt(l.sent)}</td><td class="n">${fmt(l.recd)}</td>
+      <td class="n"><b>${fmt(l.short)}</b></td><td class="n">${pct(l.fill)}</td></tr>`).join('')}</tbody></table></div>
+      ${lines.length>40?`<p class="foothint">Showing the 40 largest of ${lines.length} short lines.</p>`:''}`
+      :`<p class="note">No short lines in this scope.</p>`}
+    <p class="foothint">A Received of 0 against a non-zero Sent usually means the pod has not booked the GRN yet, not that stock went missing.</p></div>`;
 }
 
-export function prevDay(s: string): string {
-  const [dd, mm, yy] = s.split('-').map(Number);
-  const dt = new Date(Date.UTC(yy, mm - 1, dd));
-  dt.setUTCDate(dt.getUTCDate() - 1);
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${p(dt.getUTCDate())}-${p(dt.getUTCMonth() + 1)}-${dt.getUTCFullYear()}`;
-}
-
-function groupBy<T>(arr: T[], keyFn: (t: T) => string): Map<string, T[]> {
-  const m = new Map<string, T[]>();
-  for (const x of arr) {
-    const k = keyFn(x);
-    const g = m.get(k);
-    if (g) g.push(x); else m.set(k, [x]);
+/* ---------- items ---------- */
+function itemRows(){
+  let rows=itemsFor();
+  if(itemFilter==='short') rows=rows.filter(i=>i.sh>0||i.f<0.995);
+  if(itemFilter==='uneven') rows=rows.filter(i=>i.p==='uneven');
+  if(itemFilter==='zero') rows=rows.filter(i=>i.z>0);
+  if(query){ const q=query.toLowerCase(); const d=det();
+    rows=rows.filter(i=> i.i.toLowerCase().includes(q) || i.g.toLowerCase().includes(q)
+      || (i.pr||[]).some(p=>d.pods[p[0]].toLowerCase().includes(q) || (p[4]||'').toLowerCase().includes(q)));
   }
-  return m;
+  return rows;
+}
+function ioList(i){
+  const out=[];
+  (i.pr||[]).forEach(p=>String(p[4]||'').split(',').forEach(x=>{
+    const v=x.trim(); if(v&&!out.includes(v)) out.push(v);
+  }));
+  return out;
+}
+function ioCell(i){
+  const ios=ioList(i);
+  if(!ios.length) return '<span style="color:var(--muted)">—</span>';
+  if(ios.length===1) return `<span title="${esc(ios[0])}">${esc(ios[0])}</span>`;
+  return `<span title="${esc(ios.slice(0,60).join(', '))}${ios.length>60?' …':''}">${ios.length} IOs</span>`;
+}
+function mini(i){
+  if(!i.pr) return '';
+  const rows=i.pr.slice().sort((a,b)=>(a[1]?a[2]/a[1]:9)-(b[1]?b[2]/b[1]:9)).slice(0,34);
+  return `<span class="mini">${rows.map(p=>{
+    const f=Math.min(p[1]?p[2]/p[1]:0,1.5), h=Math.max(Math.round(f/1.5*14),2);
+    return `<i class="${p[2]===0?'z':''}" style="height:${h}px"></i>`;}).join('')}</span>`;
+}
+function renderItems(){
+  const tb=document.querySelector('#itemtbl tbody');
+  if(!hasDetail()){ tb.innerHTML='<tr><td colspan="12">Item-level detail is not retained for this date.</td></tr>';
+    document.getElementById('itemcount').textContent=''; return; }
+  const rows=itemRows(), d=det();
+  tb.innerHTML=rows.map(i=>{
+    const key=i.c+'|'+i.g+'|'+i.i, open=openItems.has(key);
+    let h=`<tr class="itemrow" data-k="${esc(key)}">
+      <td><b>${esc(i.i)}</b><div style="font-size:11.5px;color:var(--muted)">${CITY_SHORT[i.c]} · ${esc(i.u)}</div></td>
+      <td style="font-size:12.5px;color:var(--text-secondary);white-space:nowrap">${esc(i.g)}</td>
+      <td class="ion">${ioCell(i)}</td>
+      <td class="n">${fmt(i.o)}</td><td class="n">${fmt(i.s)}</td><td class="n">${fmt(i.r)}</td><td class="n"><b>${fmt(i.sh)}</b></td>
+      <td class="n">${pct(i.f)}</td><td class="n">${i.np}</td>
+      <td class="n">${i.z?`<span style="color:var(--critical);font-weight:650">${i.z}</span>`:'0'}</td>
+      <td>${mini(i)}</td><td><span class="pill">${esc(i.p)}</span></td></tr>`;
+    if(open&&i.pr) h+=i.pr.map(p=>`<tr class="podrow"><td>${esc(d.pods[p[0]])}</td>
+      <td></td>
+      <td class="ion">${p[4]?esc(p[4]):'—'}</td>
+      <td class="n">${fmt(p[1])}</td><td class="n">${fmt(p[2])}</td><td class="n">${fmt(p[3])}</td>
+      <td class="n">${p[1]-p[2]>0?fmt(p[1]-p[2]):'—'}</td><td class="n">${pct(p[1]?p[2]/p[1]:null)}</td>
+      <td colspan="4"></td></tr>`).join('');
+    return h;
+  }).join('');
+  {
+    const shortCount = rows.filter(i=>i.sh>0).length;
+    document.getElementById('itemcount').textContent =
+      `${rows.length} item${rows.length===1?'':'s'} shown (${shortCount} short-supplied) · ${fmt(rows.reduce((a,b)=>a+b.sh,0))} gross short units`;
+  }
+  tb.querySelectorAll('.itemrow').forEach(tr=>tr.onclick=()=>{
+    const k=tr.dataset.k; openItems.has(k)?openItems.delete(k):openItems.add(k); renderItems();
+  });
 }
 
-const K = (...parts: string[]) => parts.join('::');
+/* ---------- funnel ---------- */
+function renderFunnel(){
+  const host=document.getElementById('funnel'); host.innerHTML='';
+  act().forEach(c=>{
+    const a=dayCity(c,cat); const max=a.tord||1;
+    const steps=[['Ordered',a.tord,'var(--seq-2)','var(--text-primary)'],
+                 ['Sent',a.tsent,'var(--seq-4)','#fff'],['Received',a.trecd,'var(--seq-6)','#fff']];
+    const d=document.createElement('div');
+    d.innerHTML=`<div class="city-h"><span>${CITY_LABEL[c]}</span><span class="rule"></span></div>
+      <div class="funnel">${steps.map(([l,v,col,ink])=>`<div class="fstep"><div class="flab">${l}</div>
+        <div><div class="ffill" style="width:${Math.max(v/max*100,2)}%;background:${col};color:${ink}">${fmt(v)}</div></div>
+      </div>`).join('')}</div>
+      <div class="kv" style="margin-top:9px">
+        <span class="pill">Ordered → Sent: <b style="color:var(--text-primary)">${fmt(a.tord-a.tsent)}</b> never dispatched</span>
+        <span class="pill">Sent → Received: <b style="color:var(--text-primary)">${fmt(a.tsent-a.trecd)}</b> not booked in</span>
+        <span class="pill">${fmt(a.open)} units on open orders (excluded)</span></div>`;
+    host.appendChild(d);
+  });
+}
 
-// ---------------------------------------------------------------- loading
+/* ---------- wiring ---------- */
+function renderAll(){ renderTiles(); renderCatCards(); renderTrend(); renderPatterns();
+  renderPods(); renderItems(); renderFunnel(); }
+const press=(id,on)=>document.getElementById(id).setAttribute('aria-pressed',on?'true':'false');
+document.getElementById('cityBLR').onclick=()=>{ if(cities.BLR&&!cities.NCR)return;
+  cities.BLR=!cities.BLR; press('cityBLR',cities.BLR); selPod=null; renderAll(); };
+document.getElementById('cityNCR').onclick=()=>{ if(cities.NCR&&!cities.BLR)return;
+  cities.NCR=!cities.NCR; press('cityNCR',cities.NCR); selPod=null; renderAll(); };
+document.getElementById('podSortShort').onclick=()=>{podSort='short';press('podSortShort',1);press('podSortFill',0);renderPods();};
+document.getElementById('podSortFill').onclick=()=>{podSort='fill';press('podSortShort',0);press('podSortFill',1);renderPods();};
+['fltAll','fltShort','fltUneven','fltZero'].forEach((id,k)=>document.getElementById(id).onclick=()=>{
+  itemFilter=['all','short','uneven','zero'][k]; ['fltAll','fltShort','fltUneven','fltZero'].forEach((x,j)=>press(x,j===k)); renderItems();});
+document.getElementById('q').addEventListener('input',e=>{query=e.target.value.trim();renderItems();});
+document.getElementById('themeBtn').onclick=e=>{
+  const dark=document.documentElement.getAttribute('data-theme')==='dark';
+  document.documentElement.setAttribute('data-theme',dark?'light':'dark');
+  e.target.textContent=dark?'Dark':'Light'; press('themeBtn',!dark); renderTrend(); };
+let rt; addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(renderTrend,150);});
+/* ==========================================================================
+   In-browser pipeline. Same date/status rules, re-raise dedup and aggregation
+   as the server-side build. If a rule changes, change it here only.
+   ========================================================================== */
+const NIGHT=['Red Masala (CK)','Podi (CK)','Black Masala (CK)','Bhel Puri Mixture (CK)',
+  'Masala Peanut (CK)','Papdi (CK)','Poha Mixture (CK)'];
+const BAKERY=['Brioche Bun 4" - GGN','Mumbai Pav - GGN','Sandwich Bread - GGN','Tutti Frutti Bun - GGN'];
+const TODAY_CATS=['Production In-house','F&V'];
+const TERMINAL=['closed','received','force_closed'];
+const NCR_PREFIX=['GGN','NOI','DEL','GZB'];
+const COLS=['Product Full Name','Category','Unit Of Measure','Internal Order From Location',
+  'Internal Order Status Name','Internal Order Expected Date','Internal Order Number',
+  'Ordered Quantity','Sent Quantity','Received Quantity'];
 
-/**
- * Parse one raw Internal Order CSV export. Throws if a required column is
- * missing (mirrors the Python pipeline's hard failure, so a malformed file
- * is caught immediately instead of silently producing wrong numbers).
- */
-export function loadExport(csvText: string, filename: string): Row[] {
-  const clean = csvText.replace(/^﻿/, '');
-  const parsed = Papa.parse<Record<string, string>>(clean, { header: true, skipEmptyLines: true });
-  const fields = parsed.meta.fields || [];
-  const need = ['Ordered Quantity', 'Sent Quantity', 'Received Quantity'];
-  for (const c of need) {
-    if (!fields.includes(c)) {
-      throw new Error(`${filename}: missing column "${c}"`);
+const r2=x=>Math.round(x*100)/100;
+const toNum=v=>{const n=parseFloat(v); return Number.isFinite(n)?n:0;};
+const dkey=s=>{const p=s.split('-'); return p[2]+'-'+p[1]+'-'+p[0];};
+function prevDay(s){
+  const p=s.split('-').map(Number), dt=new Date(Date.UTC(p[2],p[1]-1,p[0]));
+  dt.setUTCDate(dt.getUTCDate()-1);
+  const z=n=>String(n).padStart(2,'0');
+  return z(dt.getUTCDate())+'-'+z(dt.getUTCMonth()+1)+'-'+dt.getUTCFullYear();
+}
+function groupBy(arr,fn){const m=new Map();
+  for(const x of arr){const k=fn(x),g=m.get(k); if(g)g.push(x); else m.set(k,[x]);} return m;}
+const KK=(...a)=>a.join('\u0001');
+
+/* RFC4180 parser — quoted fields, embedded commas and newlines, CRLF. */
+function parseCSV(text){
+  text=text.replace(/^\uFEFF/,'');
+  const rows=[]; let row=[],f='',q=false,i=0; const n=text.length;
+  while(i<n){
+    const c=text[i];
+    if(q){
+      if(c==='"'){ if(text[i+1]==='"'){f+='"';i+=2;continue;} q=false;i++;continue; }
+      f+=c;i++;continue;
     }
+    if(c==='"'){q=true;i++;continue;}
+    if(c===','){row.push(f);f='';i++;continue;}
+    if(c==='\r'){i++;continue;}
+    if(c==='\n'){row.push(f);f='';rows.push(row);row=[];i++;continue;}
+    f+=c;i++;
   }
-  const out: Row[] = [];
-  for (const r of parsed.data) {
-    const pod = r['Internal Order From Location'];
-    const exp = r['Internal Order Expected Date'];
-    if (!pod || !exp) continue;
-    const prefix = pod.split('-')[0];
-    const city: City = NCR_PREFIX.includes(prefix) ? 'NCR' : 'BLR';
+  if(f.length||row.length){row.push(f);rows.push(row);}
+  return rows;
+}
+
+function loadExport(text,filename){
+  const grid=parseCSV(text);
+  if(!grid.length) throw new Error(filename+': the file is empty');
+  const head=grid[0].map(h=>h.trim());
+  const at={}; COLS.forEach(c=>{at[c]=head.indexOf(c);});
+  ['Ordered Quantity','Sent Quantity','Received Quantity'].forEach(c=>{
+    if(at[c]<0) throw new Error(filename+': missing the column "'+c+'"');
+  });
+  const out=[];
+  for(let r=1;r<grid.length;r++){
+    const g=grid[r];
+    const pod=at['Internal Order From Location']>=0?g[at['Internal Order From Location']]:'';
+    const exp=at['Internal Order Expected Date']>=0?g[at['Internal Order Expected Date']]:'';
+    if(!pod||!exp) continue;
     out.push({
-      item: r['Product Full Name'] || '',
-      cat: r['Category'] || '',
-      uom: r['Unit Of Measure'] || '',
-      pod,
-      status: r['Internal Order Status Name'] || '',
-      exp,
-      io: r['Internal Order Number'] || '',
-      ord: toNum(r['Ordered Quantity']),
-      sent: toNum(r['Sent Quantity']),
-      recd: toNum(r['Received Quantity']),
-      city,
+      item: at['Product Full Name']>=0?(g[at['Product Full Name']]||''):'',
+      cat:  at['Category']>=0?(g[at['Category']]||''):'',
+      uom:  at['Unit Of Measure']>=0?(g[at['Unit Of Measure']]||''):'',
+      pod, exp,
+      status: at['Internal Order Status Name']>=0?(g[at['Internal Order Status Name']]||''):'',
+      io: at['Internal Order Number']>=0?(g[at['Internal Order Number']]||''):'',
+      ord: toNum(g[at['Ordered Quantity']]),
+      sent: toNum(g[at['Sent Quantity']]),
+      recd: toNum(g[at['Received Quantity']]),
+      city: NCR_PREFIX.includes(pod.split('-')[0])?'NCR':'BLR'
     });
   }
+  if(!out.length) throw new Error(filename+': no rows carry both a pod and an expected date');
   return out;
 }
 
-/** The report date a file represents: the latest expected date it contains. */
-export function discoverDate(rows: Row[]): string {
-  let best: string | null = null;
-  for (const r of rows) {
-    if (!best || dkey(r.exp) > dkey(best)) best = r.exp;
-  }
-  if (!best) throw new Error('no usable rows (missing pod/expected-date on every line)');
+/* The report date a file represents: the latest expected date it contains. */
+function discoverDate(rows){
+  let best=null;
+  for(const r of rows) if(!best||dkey(r.exp)>dkey(best)) best=r.exp;
   return best;
 }
 
-// ---------------------------------------------------------------- rules
-
-function dedupeReraised(rows: RuleRow[]): RuleRow[] {
-  const groups = groupBy(
-    rows.filter(r => r.city === 'BLR' && r.cat === 'Production In-house'),
-    r => K(r.item, r.pod),
-  );
-  const drop = new Set<RuleRow>();
-  groups.forEach(g => {
-    if (g.length > 1) {
-      const hasSent = g.some(r => r.sent > 0);
-      const hasZero = g.some(r => r.sent === 0);
-      if (hasSent && hasZero) g.filter(r => r.sent === 0).forEach(r => drop.add(r));
-    }
+function dedupeReraised(rows){
+  const groups=groupBy(rows.filter(r=>r.city==='BLR'&&r.cat==='Production In-house'),
+    r=>KK(r.item,r.pod));
+  const drop=new Set();
+  groups.forEach(g=>{
+    if(g.length>1 && g.some(r=>r.sent>0) && g.some(r=>r.sent===0))
+      g.filter(r=>r.sent===0).forEach(r=>drop.add(r));
   });
-  return rows.filter(r => !drop.has(r));
+  return rows.filter(r=>!drop.has(r));
 }
 
-function applyRules(rows: Row[], D: string): RuleRow[] {
-  const DM1 = prevDay(D);
-  const want = (r: Row): string => {
-    if (TODAY_CATS.includes(r.cat)) {
-      return r.city === 'BLR' && NIGHT.includes(r.item) ? DM1 : D;
-    }
-    if (r.city === 'NCR' && BAKERY.includes(r.item)) return D;
+function applyRules(rows,D){
+  const DM1=prevDay(D);
+  const want=r=>{
+    if(TODAY_CATS.includes(r.cat)) return (r.city==='BLR'&&NIGHT.includes(r.item))?DM1:D;
+    if(r.city==='NCR'&&BAKERY.includes(r.item)) return D;
     return DM1;
   };
-  const filtered = rows
-    .filter(r => r.exp === want(r) && r.status !== 'ordered')
-    .map(r => ({ ...r, short: Math.max(r.ord - r.sent, 0), terminal: TERMINAL.includes(r.status) }));
-  return dedupeReraised(filtered);
-}
-
-function classify(sub: Array<{ sent: number; fill: number | null }>) {
-  const n = sub.length;
-  const zero = sub.filter(s => s.sent === 0).length;
-  const full = sub.filter(s => s.fill != null && s.fill >= 0.995).length;
-  const fills = sub.map(s => s.fill).filter((f): f is number => f != null);
-  let spread = 0;
-  if (n > 1 && fills.length > 1) {
-    const mean = fills.reduce((a, b) => a + b, 0) / fills.length;
-    const variance = fills.reduce((a, b) => a + (b - mean) ** 2, 0) / (fills.length - 1);
-    spread = Math.sqrt(Math.max(variance, 0));
+  const kept=[];
+  for(const r of rows){
+    if(r.exp!==want(r)||r.status==='ordered') continue;
+    kept.push(Object.assign({},r,{short:Math.max(r.ord-r.sent,0),terminal:TERMINAL.includes(r.status)}));
   }
-  const sentSum = sub.reduce((a, s) => a + s.sent, 0);
-  let pat: string;
-  if (sentSum === 0) pat = 'total stock-out';
-  else if (full === n) pat = 'fully supplied';
-  else if (n < 2) pat = 'single pod';
-  else if (zero === 0 && spread < 0.12) pat = 'pro-rata cut';
-  else pat = 'uneven';
-  return { zero, full, spread, pat };
+  return dedupeReraised(kept);
 }
 
-// ---------------------------------------------------------------- aggregation
-
-/** Build one report date's aggregate. `framesRows` = one Row[] per input file. */
-export function buildAgg(D: string, framesRows: Row[][]): Agg {
-  const raw = framesRows.flat();
-  const d = applyRules(raw, D);
-  if (d.length === 0) throw new Error(`no rows survived the date/status rules for ${D}`);
-
-  type Line = { city: City; cat: string; item: string; uom: string; pod: string; ord: number; sent: number; recd: number; short: number; fill: number | null };
-  const lineMap = groupBy(d, r => K(r.city, r.cat, r.item, r.uom, r.pod));
-  const line: Line[] = [];
-  lineMap.forEach((rows, key) => {
-    const [city, cat, item, uom, pod] = key.split('::') as [City, string, string, string, string];
-    const ord = rows.reduce((a, r) => a + r.ord, 0);
-    const sent = rows.reduce((a, r) => a + r.sent, 0);
-    const recd = rows.reduce((a, r) => a + r.recd, 0);
-    const short = rows.reduce((a, r) => a + r.short, 0);
-    line.push({ city, cat, item, uom, pod, ord, sent, recd, short, fill: ord > 0 ? sent / ord : null });
-  });
-
-  const pods = Array.from(new Set(line.map(l => l.pod))).sort();
-  const pidx = new Map(pods.map((p, i) => [p, i]));
-
-  const pcMap = groupBy(line, l => K(l.city, l.cat, l.pod));
-  const pod_cat: Agg['pod_cat'] = [];
-  pcMap.forEach((rows, key) => {
-    const [city, cat] = key.split('::') as [City, string];
-    const ord = rows.reduce((a, r) => a + r.ord, 0);
-    const sent = rows.reduce((a, r) => a + r.sent, 0);
-    const recd = rows.reduce((a, r) => a + r.recd, 0);
-    const short = rows.reduce((a, r) => a + r.short, 0);
-    const zi = rows.filter(r => r.ord > 0 && r.sent === 0).length;
-    const s7 = rows.filter(r => r.ord > 0 && r.fill != null && r.fill < 0.70).length;
-    const pod = rows[0].pod;
-    pod_cat.push([city, cat, pidx.get(pod)!, r2(ord), r2(sent), r2(recd), r2(short), zi, s7]);
-  });
-
-  const itemMap = groupBy(line, l => K(l.city, l.cat, l.item, l.uom));
-  const items: Agg['items'] = [];
-  itemMap.forEach((rows, key) => {
-    const [city, cat, item, uom] = key.split('::') as [City, string, string, string];
-    const o = rows.reduce((a, r) => a + r.ord, 0);
-    if (o <= 0) return;
-    const s = rows.reduce((a, r) => a + r.sent, 0);
-    const recdSum = rows.reduce((a, r) => a + r.recd, 0);
-    const shSum = rows.reduce((a, r) => a + r.short, 0);
-    const { zero, full, spread, pat } = classify(rows.map(r => ({ sent: r.sent, fill: r.fill })));
-    const rec: Agg['items'][number] = {
-      c: city, g: cat, i: item, u: uom,
-      o: r2(o), s: r2(s), r: r2(recdSum), sh: r2(shSum),
-      f: Math.round((s / o) * 10000) / 10000, np: rows.length,
-      z: zero, fp: full, sp: Math.round(spread * 1000) / 1000, p: pat,
-    };
-    rec.pr = rows
-      .map((r): [number, number, number, number] => [pidx.get(r.pod)!, r2(r.ord), r2(r.sent), r2(r.recd)])
-      .sort((a, b) => {
-        const fa = a[1] ? a[2] / a[1] : 9;
-        const fb = b[1] ? b[2] / b[1] : 9;
-        if (fa !== fb) return fa - fb;
-        return b[1] - a[1];
-      });
-    items.push(rec);
-  });
-  items.sort((a, b) => b.sh - a.sh);
-
-  const csMap = groupBy(line, l => K(l.city, l.cat));
-  const cat: Agg['cat'] = [];
-  csMap.forEach((rows, key) => {
-    const [city, catName] = key.split('::') as [City, string];
-    const ord = rows.reduce((a, r) => a + r.ord, 0);
-    const sent = rows.reduce((a, r) => a + r.sent, 0);
-    const recd = rows.reduce((a, r) => a + r.recd, 0);
-    const short = rows.reduce((a, r) => a + r.short, 0);
-    const itemsN = new Set(rows.map(r => r.item)).size;
-    const podsN = new Set(rows.map(r => r.pod)).size;
-    const dScope = d.filter(r => r.city === city && r.cat === catName);
-    const term = dScope.filter(r => r.terminal);
-    const open = dScope.filter(r => !r.terminal);
-    const t_ord = term.reduce((a, r) => a + r.ord, 0);
-    const t_sent = term.reduce((a, r) => a + r.sent, 0);
-    const t_recd = term.reduce((a, r) => a + r.recd, 0);
-    const open_ord = open.reduce((a, r) => a + r.ord, 0);
-    cat.push([city, catName, r2(ord), r2(sent), r2(recd), r2(short), itemsN, podsN,
-      r2(t_ord), r2(t_sent), r2(t_recd), r2(open_ord)]);
-  });
-
-  return {
-    date: D,
-    pods,
-    pod_cat,
-    items,
-    cat,
-    schema: {
-      pod_cat: ['city', 'cat', 'pod', 'ord', 'sent', 'recd', 'short', 'zero_items', 'sub70'],
-      cat: ['city', 'cat', 'ord', 'sent', 'recd', 'short', 'items', 'pods', 't_ord', 't_sent', 't_recd', 'open_ord'],
-    },
-  };
+function classify(sub){
+  const n=sub.length;
+  const zero=sub.filter(s=>s.sent===0).length;
+  const full=sub.filter(s=>s.fill!=null&&s.fill>=0.995).length;
+  const fills=sub.map(s=>s.fill).filter(f=>f!=null);
+  let spread=0;
+  if(n>1&&fills.length>1){
+    const mean=fills.reduce((a,b)=>a+b,0)/fills.length;
+    const v=fills.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(fills.length-1);
+    spread=Math.sqrt(Math.max(v,0));
+  }
+  const sentSum=sub.reduce((a,s)=>a+s.sent,0);
+  let pat;
+  if(sentSum===0) pat='total stock-out';
+  else if(full===n) pat='fully supplied';
+  else if(n<2) pat='single pod';
+  else if(zero===0&&spread<0.12) pat='pro-rata cut';
+  else pat='uneven';
+  return {zero,full,spread,pat};
 }
 
-/** Equivalent of the Python main()'s trend/detail assembly. */
-export function buildPayload(have: Record<string, Agg>, detailDays: number): Payload {
-  const dates = Object.keys(have).sort((a, b) => (dkey(a) < dkey(b) ? -1 : dkey(a) > dkey(b) ? 1 : 0));
-  if (dates.length === 0) throw new Error('no data');
-  const trend: any[] = [];
-  dates.forEach(D => { have[D].cat.forEach(row => trend.push([D, ...row])); });
-  const detail_dates = dates.slice(-detailDays);
-  const detail: Record<string, Agg> = {};
-  detail_dates.forEach(D => { detail[D] = have[D]; });
-  return {
-    dates, detail_dates, trend, detail,
-    cat_order: CAT_ORDER,
-    schema: have[dates[dates.length - 1]].schema,
-  };
+function buildAgg(D,frames){
+  const d=applyRules(frames.flat(),D);
+  if(!d.length) throw new Error('no rows survived the date and status rules for '+D);
+
+  const line=[];
+  groupBy(d,r=>KK(r.city,r.cat,r.item,r.uom,r.pod)).forEach((rows,key)=>{
+    const k=key.split('\u0001');
+    const ios=Array.from(new Set(rows.map(r=>r.io).filter(Boolean))).sort();
+    line.push({city:k[0],cat:k[1],item:k[2],uom:k[3],pod:k[4],
+      ord:rows.reduce((a,r)=>a+r.ord,0), sent:rows.reduce((a,r)=>a+r.sent,0),
+      recd:rows.reduce((a,r)=>a+r.recd,0), short:rows.reduce((a,r)=>a+r.short,0),
+      io:ios.join(', '),
+      fill:null});
+  });
+  line.forEach(l=>{ l.fill = l.ord>0 ? l.sent/l.ord : null; });
+
+  const pods=Array.from(new Set(line.map(l=>l.pod))).sort();
+  const pidx=new Map(pods.map((p,i)=>[p,i]));
+
+  const pod_cat=[];
+  groupBy(line,l=>KK(l.city,l.cat,l.pod)).forEach((rows,key)=>{
+    const k=key.split('\u0001');
+    pod_cat.push([k[0],k[1],pidx.get(rows[0].pod),
+      r2(rows.reduce((a,r)=>a+r.ord,0)), r2(rows.reduce((a,r)=>a+r.sent,0)),
+      r2(rows.reduce((a,r)=>a+r.recd,0)), r2(rows.reduce((a,r)=>a+r.short,0)),
+      rows.filter(r=>r.ord>0&&r.sent===0).length,
+      rows.filter(r=>r.ord>0&&r.fill!=null&&r.fill<0.70).length]);
+  });
+
+  const items=[];
+  groupBy(line,l=>KK(l.city,l.cat,l.item,l.uom)).forEach((rows,key)=>{
+    const k=key.split('\u0001');
+    const o=rows.reduce((a,r)=>a+r.ord,0);
+    if(o<=0) return;
+    const sN=rows.reduce((a,r)=>a+r.sent,0);
+    const c=classify(rows.map(r=>({sent:r.sent,fill:r.fill})));
+    items.push({c:k[0],g:k[1],i:k[2],u:k[3],
+      o:r2(o), s:r2(sN), r:r2(rows.reduce((a,r)=>a+r.recd,0)),
+      sh:r2(rows.reduce((a,r)=>a+r.short,0)),
+      f:Math.round(sN/o*10000)/10000, np:rows.length,
+      z:c.zero, fp:c.full, sp:Math.round(c.spread*1000)/1000, p:c.pat,
+      pr:rows.map(r=>[pidx.get(r.pod),r2(r.ord),r2(r.sent),r2(r.recd),r.io])
+        .sort((a,b)=>{const fa=a[1]?a[2]/a[1]:9, fb=b[1]?b[2]/b[1]:9;
+          return fa!==fb?fa-fb:b[1]-a[1];})});
+  });
+  items.sort((a,b)=>b.sh-a.sh);
+
+  const catRows=[];
+  groupBy(line,l=>KK(l.city,l.cat)).forEach((rows,key)=>{
+    const k=key.split('\u0001'), city=k[0], catName=k[1];
+    const scope=d.filter(r=>r.city===city&&r.cat===catName);
+    const term=scope.filter(r=>r.terminal), open=scope.filter(r=>!r.terminal);
+    catRows.push([city,catName,
+      r2(rows.reduce((a,r)=>a+r.ord,0)), r2(rows.reduce((a,r)=>a+r.sent,0)),
+      r2(rows.reduce((a,r)=>a+r.recd,0)), r2(rows.reduce((a,r)=>a+r.short,0)),
+      new Set(rows.map(r=>r.item)).size, new Set(rows.map(r=>r.pod)).size,
+      r2(term.reduce((a,r)=>a+r.ord,0)), r2(term.reduce((a,r)=>a+r.sent,0)),
+      r2(term.reduce((a,r)=>a+r.recd,0)), r2(open.reduce((a,r)=>a+r.ord,0))]);
+  });
+
+  return {date:D,pods,pod_cat,items,cat:catRows,
+    schema:{pod_cat:['city','cat','pod','ord','sent','recd','short','zero_items','sub70'],
+            cat:['city','cat','ord','sent','recd','short','items','pods','t_ord','t_sent','t_recd','open_ord']}};
 }
+
+function buildPayload(have){
+  const dates=Object.keys(have).sort((a,b)=>dkey(a)<dkey(b)?-1:dkey(a)>dkey(b)?1:0);
+  const trend=[];
+  dates.forEach(D=>have[D].cat.forEach(row=>trend.push([D].concat(row))));
+  const detail={}; dates.forEach(D=>{detail[D]=have[D];});
+  return {dates, detail_dates:dates.slice(), trend, detail,
+          cat_order:DATA.cat_order, schema:have[dates[dates.length-1]].schema};
+}
+
+/* ==========================================================================
+   Upload handling
+   ========================================================================== */
+let AGGS = {};   // report date -> aggregate
+let RAWS = {};   // report date -> parsed rows, this session
+let META = {};   // report date -> {files:[]}
+
+const DB='iofill17', STORE='kv';
+function idb(){return new Promise((res,rej)=>{const q=indexedDB.open(DB,1);
+  q.onupgradeneeded=()=>q.result.createObjectStore(STORE);
+  q.onsuccess=()=>res(q.result); q.onerror=()=>rej(q.error);});}
+async function dbGet(k){try{const db=await idb();return await new Promise((res,rej)=>{
+  const t=db.transaction(STORE,'readonly').objectStore(STORE).get(k);
+  t.onsuccess=()=>res(t.result); t.onerror=()=>rej(t.error);});}catch(e){return undefined;}}
+async function dbSet(k,v){try{const db=await idb();await new Promise((res,rej)=>{
+  const t=db.transaction(STORE,'readwrite').objectStore(STORE).put(v,k);
+  t.onsuccess=()=>res(); t.onerror=()=>rej(t.error);});}catch(e){}}
+
+function msg(text,bad){
+  const el=document.getElementById('uplMsg');
+  el.className='uplmsg '+(bad?'bad':'ok'); el.innerHTML=text;
+}
+
+function renderChips(){
+  const host=document.getElementById('dateChips');
+  const ds=Object.keys(AGGS).sort((a,b)=>dkey(a)<dkey(b)?-1:1);
+  host.innerHTML=ds.map(D=>{
+    const a=AGGS[D], m=META[D]||{files:[]};
+    const o=a.cat.reduce((x,r)=>x+r[2],0), s=a.cat.reduce((x,r)=>x+r[3],0);
+    const f=o>0?(s/o*100).toFixed(1)+'%':'—';
+    const src=m.files.length+' file'+(m.files.length===1?'':'s');
+    return '<span class="chip-d" title="'+esc(m.files.join('\n'))+'"><b>'+esc(D)+'</b>'
+      +'<span class="meta">'+src+' · '+a.pods.length+' pods · fill '+f+'</span>'
+      +'<button class="x" data-d="'+esc(D)+'" aria-label="Remove '+esc(D)+'">&times;</button></span>';
+  }).join('');
+  host.querySelectorAll('.x').forEach(b=>b.onclick=()=>removeDate(b.dataset.d));
+}
+
+function refresh(keepDate){
+  renderChips();
+  if(!Object.keys(AGGS).length){
+    DATA={dates:[],detail_dates:[],trend:[],detail:{},cat_order:DATA.cat_order,schema:DATA.schema};
+    date=null;
+    document.body.classList.add('nodata');
+    return;
+  }
+  document.body.classList.remove('nodata');
+  DATA=buildPayload(AGGS);
+  if(!keepDate||!DATA.detail[date]) date=DATA.dates[DATA.dates.length-1];
+  selPod=null; openItems.clear();
+  initControls();
+  document.getElementById('dateSel').value=date;
+  renderChips(); renderAll();
+}
+
+async function persist(){ await dbSet('aggs',AGGS); await dbSet('meta',META); }
+
+function removeDate(D){
+  delete AGGS[D]; delete RAWS[D]; delete META[D];
+  persist(); refresh(true);
+  msg('Removed '+D+'.');
+}
+
+function readFile(f){return new Promise((res,rej)=>{
+  const r=new FileReader();
+  r.onload=()=>res(String(r.result));
+  r.onerror=()=>rej(new Error(f.name+': could not be read from disk'));
+  r.readAsText(f);});}
+
+async function ingest(fileList){
+  const files=Array.from(fileList).filter(f=>/\.csv$/i.test(f.name));
+  if(!files.length){ msg('Those are not CSV files. Export the Internal Order Products By Line Entry report as CSV.',true); return; }
+  msg('Reading '+files.length+' file'+(files.length===1?'':'s')+'…');
+  await new Promise(r=>setTimeout(r,20));
+
+  const touched=new Set(), problems=[];
+  for(const f of files){
+    try{
+      const rows=loadExport(await readFile(f),f.name);
+      const D=discoverDate(rows);
+      (RAWS[D]=RAWS[D]||[]).push(rows);
+      META[D]=META[D]||{files:[]};
+      if(!META[D].files.includes(f.name)) META[D].files.push(f.name);
+      touched.add(D);
+    }catch(e){ problems.push(e.message); }
+  }
+
+  const done=[];
+  for(const D of touched){
+    try{ AGGS[D]=buildAgg(D,RAWS[D]); done.push(D); }
+    catch(e){ problems.push(e.message); delete RAWS[D]; delete META[D]; }
+  }
+
+  await persist();
+  refresh(false);
+
+  const parts=[];
+  if(done.length){
+    const D=done.sort((a,b)=>dkey(a)<dkey(b)?-1:1)[done.length-1];
+    const a=AGGS[D], o=a.cat.reduce((x,r)=>x+r[2],0), s=a.cat.reduce((x,r)=>x+r[3],0);
+    parts.push('Loaded '+done.join(', ')+' · '+a.pods.length+' pods · '+a.items.length
+      +' items · fill '+(o>0?(s/o*100).toFixed(2)+'%':'—'));
+  }
+  if(problems.length) parts.push('<b>Skipped:</b> '+problems.map(esc).join('<br>'));
+  msg(parts.join('<br>')||'Nothing loaded.', problems.length&&!done.length);
+}
+
+/* ---------- upload wiring ---------- */
+document.getElementById('addFiles').onclick=()=>document.getElementById('fileInput').click();
+document.getElementById('fileInput').onchange=e=>{ ingest(e.target.files); e.target.value=''; };
+document.getElementById('resetData').onclick=async()=>{
+  AGGS={}; RAWS={}; META={};
+  await persist(); refresh(false);
+  msg('Cleared. Add export files to build the dashboard.');
+};
+['dragenter','dragover'].forEach(ev=>addEventListener(ev,e=>{
+  e.preventDefault(); document.getElementById('upl').classList.add('dropping');}));
+['dragleave','drop'].forEach(ev=>addEventListener(ev,e=>{
+  e.preventDefault(); if(ev==='drop'||!e.relatedTarget) document.getElementById('upl').classList.remove('dropping');}));
+addEventListener('drop',e=>{ if(e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files.length) ingest(e.dataTransfer.files); });
+
+/* ---------- boot ---------- */
+(async function(){
+  const saved=await dbGet('aggs'), savedMeta=await dbGet('meta');
+  if(saved&&Object.keys(saved).length){ AGGS=saved; META=savedMeta||{}; }
+  refresh(false);
+  if(saved&&Object.keys(saved).length)
+    msg('Restored '+Object.keys(saved).length+' report date'
+      +(Object.keys(saved).length===1?'':'s')+' from this browser.');
+  else
+    msg('No data loaded yet. Add one or more Internal Order exports to begin — '
+      +'the BLR and Delhi-NCR files for a date can go in together.');
+})();
+</script>
+</body>
+</html>
