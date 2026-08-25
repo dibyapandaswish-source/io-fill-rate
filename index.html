@@ -117,11 +117,30 @@ svg text{font-family:inherit}
 </style>
 </head>
 <body>
+<noscript><div style="background:#fee;color:#900;padding:14px;margin:14px;border:1px solid #900;border-radius:8px;font:14px sans-serif">
+  This file needs JavaScript to run, and your browser has it turned off (or blocked it for this file). Try opening it in Chrome or Edge instead — if you already are, drag this file into an already-open browser window rather than double-clicking it, since some Windows setups open local files in a restricted viewer that blocks scripts.
+</div></noscript>
+<div id="jsFatalError" style="display:none;background:#fee;color:#900;padding:14px;margin:14px;border:1px solid #900;border-radius:8px;font:13px/1.5 monospace;white-space:pre-wrap"></div>
+<script>
+window.addEventListener('error', function(e){
+  var el = document.getElementById('jsFatalError');
+  if(!el) return;
+  el.style.display='block';
+  el.textContent += 'Script error: ' + (e.message||'unknown') + (e.filename?(' — '+e.filename+':'+e.lineno+':'+e.colno):'') + '\n';
+});
+window.addEventListener('unhandledrejection', function(e){
+  var el = document.getElementById('jsFatalError');
+  if(!el) return;
+  el.style.display='block';
+  el.textContent += 'Promise error: ' + ((e.reason && (e.reason.message||e.reason)) || 'unknown') + '\n';
+});
+</script>
 <div class="wrap">
 <header class="top">
   <div>
     <h1>IO Fill Rate — pod-wise short supply</h1>
     <p class="sub">Ordered → Sent → Received by pod, item and category · BLR &amp; Delhi-NCR (GGN+NOI+DEL) · same date &amp; status rules as the IO Fill Rate Log</p>
+    <p class="sub" id="jsReady" style="color:#b45309">Checking script… (if this line never changes, JavaScript isn't running for this file in this browser)</p>
   </div>
   <button class="ctl" id="themeBtn" aria-pressed="false">Dark</button>
 </header>
@@ -145,6 +164,7 @@ svg text{font-family:inherit}
 <div class="bar">
   <span class="lab">Date</span>
   <select class="ctl" id="dateSel"></select>
+  <button class="ctl" id="removeDateBtn" title="Remove the selected date from this dashboard" disabled>Delete this date</button>
   <span class="sep"></span>
   <span class="lab">City</span>
   <button class="ctl" id="cityBLR" aria-pressed="true">BLR</button>
@@ -225,6 +245,7 @@ svg text{font-family:inherit}
 
 <script id="dataTag" type="application/json">{"dates": [], "detail_dates": [], "trend": [], "detail": {}, "cat_order": ["Production In-house", "Dry RM", "Packaging", "Sauces And Syrups", "Beverage", "F&V", "Chilled & Frozen", "Desserts"], "schema": {"pod_cat": ["city", "cat", "pod", "ord", "sent", "recd", "short", "zero_items", "sub70"], "cat": ["city", "cat", "ord", "sent", "recd", "short", "items", "pods", "t_ord", "t_sent", "t_recd", "open_ord"]}}</script>
 <script>
+(function(){ var el=document.getElementById('jsReady'); if(el){ el.textContent='Script loaded, building the page…'; } })();
 const DATA = JSON.parse(document.getElementById('dataTag').textContent);
 const CITY_LABEL = {BLR:'BLR', NCR:'Delhi-NCR (GGN+NOI+DEL)'};
 const CITY_SHORT = {BLR:'BLR', NCR:'Delhi-NCR'};
@@ -313,6 +334,8 @@ function initControls(){
         `<option value="${d}"${d===date?' selected':''}>${d}${DATA.detail[d]?'':' (summary only)'}</option>`).join('')
     : `<option value="">No data yet</option>`;
   ds.onchange = e=>{ date=e.target.value; selPod=null; openItems.clear(); renderAll(); };
+  const rd=document.getElementById('removeDateBtn');
+  if(rd) rd.disabled = !(typeof mergeAggIntoData==='function' && DATA.dates.length>0);
   const cs=document.getElementById('catSel');
   cs.innerHTML = `<option value="ALL">All categories</option>` +
     DATA.cat_order.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
@@ -702,7 +725,10 @@ function discoverReportDate(rows){
 }
 
 function dedupeReraised(rows){
-  const groups=pGroupBy(rows.filter(r=>r.city==='BLR'&&r.cat==='Production In-house'), r=>pK(r.item,r.pod));
+  // Production In-house, both cities: originally a BLR-only CK re-raise
+  // pattern, but from 25-08-2026 the same thing started happening for
+  // NCR/Noida pods too, so this is no longer city-restricted.
+  const groups=pGroupBy(rows.filter(r=>r.cat==='Production In-house'), r=>pK(r.item,r.pod));
   const drop=new Set();
   groups.forEach(g=>{
     if(g.length>1){
@@ -896,17 +922,37 @@ document.getElementById('downloadBtn').onclick=()=>{
   const blob = new Blob([html], {type:'text/html'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  const latest = DATA.dates[DATA.dates.length-1];
+  const latest = DATA.dates.length ? DATA.dates[DATA.dates.length-1] : 'empty';
   a.download = `IO Fill Rate dashboard (through ${latest}).html`;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(a.href);
 };
 
+document.getElementById('removeDateBtn').onclick=()=>{
+  if(!date) return;
+  const target=date;
+  if(!confirm(`Remove ${target} from this dashboard?\n\nThis only affects the copy of the dashboard open in this tab — click "Download updated dashboard" afterwards to save it without that date. If you skip that, reopening the original file will still have it.`)) return;
+  DATA.dates = DATA.dates.filter(d=>d!==target);
+  DATA.detail_dates = DATA.detail_dates.filter(d=>d!==target);
+  delete DATA.detail[target];
+  DATA.trend = DATA.trend.filter(r=>r[0]!==target);
+  date = DATA.dates[DATA.dates.length-1];
+  selPod=null; openItems.clear();
+  initControls(); renderAll();
+  document.getElementById('downloadBtn').disabled = DATA.dates.length===0;
+  logLine(`Removed ${target}. Click "Download updated dashboard" to save this as your new file.`);
+};
+
+// if this file already ships with data (e.g. it's a previously-downloaded
+// dashboard, or the delivered starting copy), the download button should
+// work immediately without requiring a fresh upload first
+document.getElementById('downloadBtn').disabled = DATA.dates.length===0;
 
 
 
 
 initControls(); renderAll();
+(function(){ var el=document.getElementById('jsReady'); if(el){ el.textContent='Dashboard ready.'; el.style.color='var(--good)'; } })();
 </script>
 </body>
 </html>
