@@ -45,7 +45,15 @@ h1{font-size:21px;margin:0 0 2px;letter-spacing:-0.01em}
 button.ctl,select.ctl{font:inherit;font-size:13px;padding:6px 11px;border-radius:8px;cursor:pointer;
   background:var(--plane);color:var(--text-primary);border:1px solid var(--border)}
 button.ctl[aria-pressed="true"]{background:var(--text-primary);color:var(--surface-1);border-color:var(--text-primary)}
-button.ctl:hover:not([aria-pressed="true"]){background:var(--ghost)}
+button.ctl:hover:not([aria-pressed="true"]):not(:disabled){background:var(--ghost)}
+button.ctl:disabled,select.ctl:disabled{opacity:.45;cursor:not-allowed}
+td.io{white-space:nowrap}
+.iotag{display:inline-block;font:500 11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  background:var(--ghost);border:1px solid var(--border);border-radius:5px;padding:1px 6px;
+  cursor:pointer;color:var(--text-secondary);user-select:all}
+.iotag:hover{background:var(--plane);color:var(--text-primary)}
+.iotag.ok{color:var(--good);border-color:var(--good);user-select:none}
+.iomore{font-size:11px;color:var(--muted);margin-left:2px}
 section{background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:20px;margin-top:16px}
 h2{font-size:15px;margin:0 0 3px;letter-spacing:-0.005em}
 .note{color:var(--text-secondary);font-size:12.5px;margin:0 0 15px;max-width:80ch}
@@ -172,6 +180,9 @@ window.addEventListener('unhandledrejection', function(e){
   <span class="sep"></span>
   <span class="lab">Category</span>
   <select class="ctl" id="catSel"></select>
+  <span class="sep"></span>
+  <span class="lab">Store</span>
+  <select class="ctl" id="storeSel" title="Narrow the whole dashboard to one store"></select>
 </div>
 
 <section>
@@ -194,7 +205,7 @@ window.addEventListener('unhandledrejection', function(e){
   <div class="chartbox" id="chartShort" style="margin-top:6px"></div>
 </section>
 
-<section>
+<section id="secPatterns">
   <h2>Was the cut shared, or did some pods get starved?</h2>
   <p class="note">Each short item is classified by how the available quantity was split across the pods that ordered it. <b>Pro-rata cut</b> — everyone took a similar percentage hit (a production/supply problem). <b>Uneven</b> — some pods served in full while others got zero or near-zero (an allocation problem). <b>Total stock-out</b> — nothing sent to anyone.</p>
   <div class="legend">
@@ -205,7 +216,7 @@ window.addEventListener('unhandledrejection', function(e){
   <div id="patterns"></div>
 </section>
 
-<section>
+<section id="secPods">
   <h2>Which pods absorbed the hit</h2>
   <p class="note">Ranked by gross short units for the selected date and category. Click a pod to see the lines it was short on.</p>
   <div class="tools">
@@ -217,8 +228,8 @@ window.addEventListener('unhandledrejection', function(e){
 </section>
 
 <section>
-  <h2>Item → pod bifurcation</h2>
-  <p class="note">Every item ordered this date, biggest gross shortfall first (fully-supplied items sort to the bottom). Click a row for the pod-level split of what was actually sent. Mini bars are each pod's fill % — red means that pod received nothing.</p>
+  <h2 id="itemsH">Item → pod bifurcation</h2>
+  <p class="note" id="itemsNote">Every item ordered this date, biggest gross shortfall first (fully-supplied items sort to the bottom). Click a row for the pod-level split of what was actually sent. Mini bars are each pod's fill % — red means that pod received nothing.</p>
   <div class="tools">
     <input type="search" id="q" placeholder="Search item, pod, or IO number…" aria-label="Search item, pod, or IO number">
     <button class="ctl" id="fltAll" aria-pressed="true">All patterns</button>
@@ -227,7 +238,7 @@ window.addEventListener('unhandledrejection', function(e){
     <button class="ctl" id="fltZero" aria-pressed="false">Has zero-supplied pods</button>
   </div>
   <div style="overflow-x:auto"><table id="itemtbl"><thead><tr>
-    <th>Item</th><th>Category</th><th class="n">Ordered</th><th class="n">Sent</th><th class="n">Received</th>
+    <th>Item</th><th>Category</th><th>IO number</th><th class="n">Ordered</th><th class="n">Sent</th><th class="n">Received</th>
     <th class="n">Short</th><th class="n">Fill %</th><th class="n">Pods</th><th class="n">Zero</th>
     <th>Spread</th><th>Pattern</th></tr></thead><tbody></tbody></table></div>
   <p class="foothint" id="itemcount"></p>
@@ -235,7 +246,7 @@ window.addEventListener('unhandledrejection', function(e){
 
 <section>
   <h2>Ordered → Sent → Received</h2>
-  <p class="note">Limited to internal orders that reached a terminal status (closed / received / force_closed) so the received leg is comparable — orders still <i>confirmed</i> or <i>sent</i> simply have not been booked in yet and would read as a false loss. Sent → Received is quantity that left the warehouse but was never GRN'd at the pod.</p>
+  <p class="note" id="funnelNote">Limited to internal orders that reached a terminal status (closed / received / force_closed) so the received leg is comparable — orders still <i>confirmed</i> or <i>sent</i> simply have not been booked in yet and would read as a false loss. Sent → Received is quantity that left the warehouse but was never GRN'd at the pod.</p>
   <div id="funnel"></div>
 </section>
 
@@ -256,6 +267,7 @@ const T = {DATE:0, CITY:1, CAT:2, ORD:3, SENT:4, RECD:5, SHORT:6, ITEMS:7, PODS:
 let date = DATA.dates[DATA.dates.length-1];
 let cities = {BLR:true, NCR:true};
 let cat = 'ALL', podSort='short', itemFilter='all', query='', selPod=null;
+let store = 'ALL';          // selected store (pod name), 'ALL' = every store
 let openItems = new Set();
 
 const fmt = n => (Math.round(n*100)/100).toLocaleString('en-IN');
@@ -264,6 +276,45 @@ const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const act = () => ['BLR','NCR'].filter(c=>cities[c]);
 const det = () => DATA.detail[date] || null;
 const hasDetail = () => !!DATA.detail[date];
+const rd2 = x => Math.round(x*100)/100;
+
+/* ---------- store (pod) helpers ---------- */
+const oneStore = () => store !== 'ALL';
+/** index of the selected store inside this date's pods list, or -1 */
+function storePi(){ const d=det(); return d ? d.pods.indexOf(store) : -1; }
+/** { podName: city } for the selected date, straight from pod_cat */
+function podCityMap(){
+  const d=det(), m={};
+  if(d) d.pod_cat.forEach(r=>{ m[d.pods[r[2]]] = r[0]; });
+  return m;
+}
+/** the selected store's own Ordered/Sent/Received/Short for this date + category */
+function dayStore(category){
+  const d=det(), pi=storePi();
+  if(!d || pi<0) return null;
+  const a={ord:0,sent:0,recd:0,short:0,items:0,pods:1,zi:0,s7:0,city:null,seen:false};
+  d.pod_cat.forEach(r=>{
+    const [c,g,ppi,o,s,rc,sh,zi,s7]=r;
+    if(ppi!==pi) return; if(category!=='ALL'&&g!==category) return;
+    a.city=c; a.seen=true;
+    a.ord+=o; a.sent+=s; a.recd+=rc; a.short+=sh; a.zi+=zi; a.s7+=s7;
+  });
+  return a.seen ? a : null;
+}
+/** day-by-day history for the selected store, rebuilt from each date's own detail */
+function trendForStore(category){
+  return DATA.dates.map(D=>{
+    const dd=DATA.detail[D];
+    const pi=dd ? dd.pods.indexOf(store) : -1;
+    if(pi<0) return {date:D,ord:0,sent:0,recd:0,short:0,has:false};
+    const a={date:D,ord:0,sent:0,recd:0,short:0,has:true};
+    dd.pod_cat.forEach(r=>{
+      if(r[2]!==pi) return; if(category!=='ALL'&&r[1]!==category) return;
+      a.ord+=r[3]; a.sent+=r[4]; a.recd+=r[5]; a.short+=r[6];
+    });
+    return a;
+  });
+}
 
 const ICON = {
   good:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M6.2 11.4 3 8.2l1.1-1.1 2.1 2.1 5-5L12.3 5.3z"/></svg>',
@@ -323,7 +374,25 @@ function podRows(){
 }
 function itemsFor(){
   const d=det(); if(!d) return [];
-  return d.items.filter(i=>cities[i.c] && (cat==='ALL'||i.g===cat));
+  const rows = d.items.filter(i=>cities[i.c] && (cat==='ALL'||i.g===cat));
+  if(!oneStore()) return rows;
+  // Store view: rebuild each item from just this store's own line, so every
+  // number in the table is what THIS store ordered and received — not the
+  // network total. Items the store did not order drop out entirely.
+  const pi = storePi(); if(pi<0) return [];
+  const out=[];
+  rows.forEach(i=>{
+    const p=(i.pr||[]).find(x=>x[0]===pi); if(!p) return;
+    const o=p[1], s=p[2], r=p[3];
+    if(o<=0) return;
+    const f = o ? Math.round(s/o*10000)/10000 : 0;
+    out.push({...i, o:rd2(o), s:rd2(s), r:rd2(r), sh:rd2(Math.max(o-s,0)), f,
+      np:1, z:(s===0?1:0), fp:(f>=0.995?1:0), sp:0,
+      p:(s===0 ? 'total stock-out' : (f>=0.995 ? 'fully supplied' : 'single pod')),
+      pr:[p]});
+  });
+  out.sort((a,b)=>b.sh-a.sh);
+  return out;
 }
 
 /* ---------- controls ---------- */
@@ -333,22 +402,73 @@ function initControls(){
     ? DATA.dates.slice().reverse().map(d=>
         `<option value="${d}"${d===date?' selected':''}>${d}${DATA.detail[d]?'':' (summary only)'}</option>`).join('')
     : `<option value="">No data yet</option>`;
-  ds.onchange = e=>{ date=e.target.value; selPod=null; openItems.clear(); renderAll(); };
+  ds.onchange = e=>{ date=e.target.value; selPod=null; openItems.clear();
+    refreshStoreOptions(); renderAll(); };
   const rd=document.getElementById('removeDateBtn');
   if(rd) rd.disabled = !(typeof mergeAggIntoData==='function' && DATA.dates.length>0);
   const cs=document.getElementById('catSel');
-  cs.innerHTML = `<option value="ALL">All categories</option>` +
-    DATA.cat_order.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  cs.innerHTML = `<option value="ALL"${cat==='ALL'?' selected':''}>All categories</option>` +
+    DATA.cat_order.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');
   cs.onchange = e=>{ cat=e.target.value; selPod=null; openItems.clear(); renderAll(); };
+  refreshStoreOptions();
+  document.getElementById('storeSel').onchange = e=>{
+    store=e.target.value; selPod=null; openItems.clear(); renderAll();
+  };
+}
+/** rebuild the store list for the current date + active cities, keeping the
+    current pick if that store still exists in scope */
+function refreshStoreOptions(){
+  const ss=document.getElementById('storeSel'); if(!ss) return;
+  const d=det();
+  if(!d){ store='ALL'; ss.innerHTML='<option value="ALL">All stores</option>'; ss.disabled=true; return; }
+  const m=podCityMap();
+  const avail=d.pods.filter(p=>cities[m[p]]);
+  if(oneStore() && avail.indexOf(store)<0) store='ALL';
+  const groups=['BLR','NCR'].filter(c=>cities[c]).map(c=>{
+    const ps=avail.filter(p=>m[p]===c);
+    return ps.length ? `<optgroup label="${esc(CITY_LABEL[c])}">`+ps.map(p=>
+      `<option value="${esc(p)}"${p===store?' selected':''}>${esc(p)}</option>`).join('')+`</optgroup>` : '';
+  }).join('');
+  ss.innerHTML=`<option value="ALL"${store==='ALL'?' selected':''}>All stores (${avail.length})</option>`+groups;
+  ss.disabled=false;
 }
 function setCat(c){ cat=c; document.getElementById('catSel').value=c; selPod=null; openItems.clear(); renderAll(); }
 
 /* ---------- tiles ---------- */
+function tileHTML(list){
+  return `<div class="tiles">${list.map(([l,v,f,fl])=>
+    `<div class="tile"><div class="lab">${l}</div><div class="val">${v}</div>
+     <div class="foot">${fl!=null&&!isNaN(fl)?chip(fl)+' ':''}${f}</div></div>`).join('')}</div>`;
+}
 function renderTiles(){
   document.getElementById('glanceH').textContent = date
-    ? `At a glance — ${date}${cat==='ALL'?'':' · '+cat}`
+    ? `At a glance — ${date}${cat==='ALL'?'':' · '+cat}${oneStore()?' · '+store:''}`
     : 'At a glance — no data yet, upload a file above';
   const host=document.getElementById('tiles'); host.innerHTML='';
+
+  if(oneStore()){
+    const a=dayStore(cat);
+    if(!a){ host.innerHTML=`<p class="note">${esc(store)} has no orders on this date${cat==='ALL'?'':' in '+esc(cat)}.</p>`; return; }
+    const items=itemsFor();
+    const shortItems=items.filter(i=>i.f<0.995).length;
+    const zeroLines=items.filter(i=>i.s===0).length;
+    const gap=a.sent-a.recd;
+    const fill=a.ord?a.sent/a.ord:NaN;
+    const h=document.createElement('div'); h.className='city-h';
+    h.innerHTML=`<span>${esc(store)}</span><span class="rule"></span>
+      <span style="font-size:12px;color:var(--muted);font-weight:500">${a.city?CITY_LABEL[a.city]:''}</span>`;
+    host.appendChild(h);
+    const g=document.createElement('div');
+    g.innerHTML=tileHTML([
+      ['Fill rate',pct(fill),`${fmt(a.ord)} ordered → ${fmt(a.sent)} sent`,fill],
+      ['Short units',fmt(a.short),`${shortItems} items short · ${zeroLines} at zero`,null],
+      ['Items ordered',fmt(items.length),`this store only${cat==='ALL'?'':' · '+esc(cat)}`,null],
+      ['Sent → Received gap',fmt(gap),`${pct(a.sent?gap/a.sent:NaN)} of what was dispatched here`,null]
+    ]);
+    host.appendChild(g);
+    return;
+  }
+
   act().forEach(c=>{
     const a=dayCity(c,cat);
     const items=itemsFor().filter(i=>i.c===c);
@@ -374,10 +494,19 @@ function renderTiles(){
 /* ---------- category cards ---------- */
 function renderCatCards(){
   const host=document.getElementById('catcards');
-  const rows=DATA.trend.filter(r=>r[T.DATE]===date && cities[r[T.CITY]]);
   const m={};
-  rows.forEach(r=>{const x=m[r[T.CAT]]||(m[r[T.CAT]]={ord:0,sent:0,short:0});
-    x.ord+=r[T.ORD]; x.sent+=r[T.SENT]; x.short+=r[T.SHORT];});
+  if(oneStore()){
+    const d=det(), pi=storePi();
+    if(d&&pi>=0) d.pod_cat.forEach(r=>{
+      if(r[2]!==pi) return;
+      const x=m[r[1]]||(m[r[1]]={ord:0,sent:0,short:0});
+      x.ord+=r[3]; x.sent+=r[4]; x.short+=r[6];
+    });
+  } else {
+    DATA.trend.filter(r=>r[T.DATE]===date && cities[r[T.CITY]]).forEach(r=>{
+      const x=m[r[T.CAT]]||(m[r[T.CAT]]={ord:0,sent:0,short:0});
+      x.ord+=r[T.ORD]; x.sent+=r[T.SENT]; x.short+=r[T.SHORT];});
+  }
   const order=DATA.cat_order.filter(c=>m[c]);
   host.innerHTML=`<div class="catgrid">${order.map(c=>{
     const x=m[c], f=x.ord?x.sent/x.ord:NaN, fl=flagOf(f);
@@ -465,6 +594,20 @@ function barChart(host,series,title){
   });
 }
 function renderTrend(){
+  if(oneStore()){
+    const rows=trendForStore(cat);
+    const col=CITY_COLOR[podCityMap()[store]||'BLR'];
+    const withDetail=rows.filter(r=>r.has).length;
+    document.getElementById('trendLegend').innerHTML =
+      `<span class="k"><span class="sw" style="background:${col}"></span>${esc(store)}</span>`
+      + `<span style="color:var(--muted)">${cat==='ALL'?'all categories':esc(cat)} · ${withDetail} of ${rows.length} dates have store-level detail</span>`;
+    lineChart(document.getElementById('chartFill'),
+      [{name:store,color:col,pts:rows.map(r=>r.has&&r.ord?r.sent/r.ord:null)}],
+      v=>(v*100).toFixed(0)+'%','Fill rate by date');
+    barChart(document.getElementById('chartShort'),
+      [{name:store,color:col,pts:rows.map(r=>r.has?r.short:0)}],'Gross short units by date');
+    return;
+  }
   const ser=act().map(c=>({name:CITY_SHORT[c],color:CITY_COLOR[c],city:c,rows:trendFor(c,cat)}));
   document.getElementById('trendLegend').innerHTML = ser.map(s=>
     `<span class="k"><span class="sw" style="background:${s.color}"></span>${s.name}</span>`).join('')
@@ -479,6 +622,7 @@ function renderTrend(){
 /* ---------- patterns ---------- */
 function renderPatterns(){
   const host=document.getElementById('patterns');
+  if(oneStore()){ host.innerHTML=''; return; }
   if(!hasDetail()){ host.innerHTML='<p class="note">Item-level detail is not retained for this date.</p>'; return; }
   const colors={'pro-rata cut':'var(--s1)','uneven':'var(--s2)','total stock-out':'var(--s3)','single pod':'var(--muted)'};
   const order=['pro-rata cut','uneven','total stock-out','single pod'];
@@ -509,6 +653,7 @@ function renderPatterns(){
 /* ---------- pods ---------- */
 function renderPods(){
   const host=document.getElementById('podbars');
+  if(oneStore()){ host.innerHTML=''; document.getElementById('poddrill').innerHTML=''; return; }
   if(!hasDetail()){ host.innerHTML='<p class="note">Pod-level detail is not retained for this date.</p>';
     document.getElementById('poddrill').innerHTML=''; return; }
   let rows=podRows();
@@ -535,20 +680,22 @@ function renderPodDrill(){
   itemsFor().filter(i=>i.c===city && i.pr).forEach(i=>{
     i.pr.forEach(p=>{ if(p[0]!==pi) return;
       const sh=Math.max(p[1]-p[2],0); if(sh<=0) return;
-      lines.push({item:i.i,cat:i.g,uom:i.u,ord:p[1],sent:p[2],recd:p[3],short:sh,fill:p[1]?p[2]/p[1]:null});
+      lines.push({item:i.i,cat:i.g,uom:i.u,io:p[4],ord:p[1],sent:p[2],recd:p[3],short:sh,fill:p[1]?p[2]/p[1]:null});
     });
   });
   lines.sort((a,b)=>b.short-a.short);
   host.innerHTML=`<div class="drill"><h3>${esc(pod)} — short lines${cat==='ALL'?'':' · '+esc(cat)} (${lines.length})</h3>
-    ${lines.length?`<div style="overflow-x:auto"><table><thead><tr><th>Item</th><th>Category</th>
+    ${lines.length?`<div style="overflow-x:auto"><table><thead><tr><th>Item</th><th>Category</th><th>IO number</th>
       <th class="n">Ordered</th><th class="n">Sent</th><th class="n">Received</th><th class="n">Short</th><th class="n">Fill %</th>
       </tr></thead><tbody>${lines.slice(0,40).map(l=>`<tr><td>${esc(l.item)}</td>
       <td style="font-size:12.5px;color:var(--text-secondary);white-space:nowrap">${esc(l.cat)}</td>
+      <td class="io">${ioTags(l.io)}</td>
       <td class="n">${fmt(l.ord)}</td><td class="n">${fmt(l.sent)}</td><td class="n">${fmt(l.recd)}</td>
       <td class="n"><b>${fmt(l.short)}</b></td><td class="n">${pct(l.fill)}</td></tr>`).join('')}</tbody></table></div>
       ${lines.length>40?`<p class="foothint">Showing the 40 largest of ${lines.length} short lines.</p>`:''}`
       :`<p class="note">No short lines in this scope.</p>`}
     <p class="foothint">A Received of 0 against a non-zero Sent usually means the pod has not booked the GRN yet, not that stock went missing.</p></div>`;
+  wireIOTags(host);
 }
 
 /* ---------- items ---------- */
@@ -563,6 +710,44 @@ function itemRows(){
   }
   return rows;
 }
+/* ---------- IO numbers (click any one to copy it for a Shoptree search) ---------- */
+function ioSplit(s){ return String(s||'').split(',').map(x=>x.trim()).filter(Boolean); }
+function ioList(i){
+  const set=new Set();
+  (i.pr||[]).forEach(p=>ioSplit(p[4]).forEach(x=>set.add(x)));
+  return [...set].sort();
+}
+const ioTag = io => `<span class="iotag" data-io="${esc(io)}" title="Click to copy">${esc(io)}</span>`;
+const dash  = '<span style="color:var(--muted)">—</span>';
+function ioTags(s){ const l=ioSplit(s); return l.length ? l.map(ioTag).join(' ') : dash; }
+function ioCell(i){
+  const l=ioList(i);
+  if(!l.length) return dash;
+  if(l.length<=2) return l.map(ioTag).join(' ');
+  return ioTag(l[0]) + `<span class="iomore">+${l.length-1} more</span>`;
+}
+function copyFallback(txt, done){
+  try{
+    const ta=document.createElement('textarea');
+    ta.value=txt; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); done();
+  }catch(e){ /* clipboard blocked — the text is still select-all on click */ }
+}
+function copyIO(txt, el){
+  const done=()=>{ const old=el.textContent; el.classList.add('ok'); el.textContent='copied ✓';
+    setTimeout(()=>{ el.textContent=old; el.classList.remove('ok'); }, 900); };
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(txt).then(done, ()=>copyFallback(txt,done)); return;
+    }
+  }catch(e){}
+  copyFallback(txt, done);
+}
+function wireIOTags(root){
+  root.querySelectorAll('.iotag').forEach(el=>{
+    el.onclick=ev=>{ ev.stopPropagation(); copyIO(el.dataset.io, el); };
+  });
+}
 function mini(i){
   if(!i.pr) return '';
   const rows=i.pr.slice().sort((a,b)=>(a[1]?a[2]/a[1]:9)-(b[1]?b[2]/b[1]:9)).slice(0,34);
@@ -572,7 +757,22 @@ function mini(i){
 }
 function renderItems(){
   const tb=document.querySelector('#itemtbl tbody');
-  if(!hasDetail()){ tb.innerHTML='<tr><td colspan="11">Item-level detail is not retained for this date.</td></tr>';
+  const hEl=document.getElementById('itemsH'), nEl=document.getElementById('itemsNote');
+  if(hEl) hEl.textContent = oneStore() ? `Items for ${store}` : 'Item → pod bifurcation';
+  // "uneven" describes how one item was split ACROSS pods — meaningless for a
+  // single store, so park that filter instead of letting it return nothing
+  const uv=document.getElementById('fltUneven');
+  if(uv){
+    uv.disabled = oneStore();
+    uv.title = oneStore() ? 'Only applies when looking across stores' : '';
+    if(oneStore() && itemFilter==='uneven'){
+      itemFilter='all'; press('fltAll',1); press('fltUneven',0);
+    }
+  }
+  if(nEl) nEl.innerHTML = oneStore()
+    ? `Every item <b>${esc(store)}</b> ordered this date, with this store's own ordered, sent and received quantities — biggest shortfall first. The IO number for each line is shown; click it to copy it for a Shoptree search.`
+    : `Every item ordered this date, biggest gross shortfall first (fully-supplied items sort to the bottom). Click a row for the pod-level split, with the IO number behind each pod's line — click any IO to copy it. Mini bars are each pod's fill % — red means that pod received nothing.`;
+  if(!hasDetail()){ tb.innerHTML='<tr><td colspan="12">Item-level detail is not retained for this date.</td></tr>';
     document.getElementById('itemcount').textContent=''; return; }
   const rows=itemRows(), d=det();
   tb.innerHTML=rows.map(i=>{
@@ -580,12 +780,13 @@ function renderItems(){
     let h=`<tr class="itemrow" data-k="${esc(key)}">
       <td><b>${esc(i.i)}</b><div style="font-size:11.5px;color:var(--muted)">${CITY_SHORT[i.c]} · ${esc(i.u)}</div></td>
       <td style="font-size:12.5px;color:var(--text-secondary);white-space:nowrap">${esc(i.g)}</td>
+      <td class="io">${ioCell(i)}</td>
       <td class="n">${fmt(i.o)}</td><td class="n">${fmt(i.s)}</td><td class="n">${fmt(i.r)}</td><td class="n"><b>${fmt(i.sh)}</b></td>
       <td class="n">${pct(i.f)}</td><td class="n">${i.np}</td>
       <td class="n">${i.z?`<span style="color:var(--critical);font-weight:650">${i.z}</span>`:'0'}</td>
       <td>${mini(i)}</td><td><span class="pill">${esc(i.p)}</span></td></tr>`;
     if(open&&i.pr) h+=i.pr.map(p=>`<tr class="podrow"><td>${esc(d.pods[p[0]])}</td>
-      <td style="font-size:11.5px;color:var(--muted);white-space:nowrap">${p[4]?esc(p[4]):'—'}</td>
+      <td></td><td class="io">${ioTags(p[4])}</td>
       <td class="n">${fmt(p[1])}</td><td class="n">${fmt(p[2])}</td><td class="n">${fmt(p[3])}</td>
       <td class="n">${p[1]-p[2]>0?fmt(p[1]-p[2]):'—'}</td><td class="n">${pct(p[1]?p[2]/p[1]:null)}</td>
       <td colspan="4"></td></tr>`).join('');
@@ -599,11 +800,34 @@ function renderItems(){
   tb.querySelectorAll('.itemrow').forEach(tr=>tr.onclick=()=>{
     const k=tr.dataset.k; openItems.has(k)?openItems.delete(k):openItems.add(k); renderItems();
   });
+  wireIOTags(tb);
 }
 
 /* ---------- funnel ---------- */
 function renderFunnel(){
   const host=document.getElementById('funnel'); host.innerHTML='';
+  const fn=document.getElementById('funnelNote');
+
+  if(oneStore()){
+    if(fn) fn.innerHTML = `Ordered → Sent → Received for <b>${esc(store)}</b>. Unlike the city view, this covers <i>every</i> order in scope, not only the ones that reached a terminal status — the terminal split is not retained per store — so a large "not booked in" figure here can simply be orders the store has not GRN'd yet.`;
+    const a=dayStore(cat);
+    if(!a){ host.innerHTML=`<p class="note">No orders for ${esc(store)} on this date.</p>`; return; }
+    const max=a.ord||1;
+    const steps=[['Ordered',a.ord,'var(--seq-2)','var(--text-primary)'],
+                 ['Sent',a.sent,'var(--seq-4)','#fff'],['Received',a.recd,'var(--seq-6)','#fff']];
+    const d=document.createElement('div');
+    d.innerHTML=`<div class="city-h"><span>${esc(store)}</span><span class="rule"></span></div>
+      <div class="funnel">${steps.map(([l,v,col,ink])=>`<div class="fstep"><div class="flab">${l}</div>
+        <div><div class="ffill" style="width:${Math.max(v/max*100,2)}%;background:${col};color:${ink}">${fmt(v)}</div></div>
+      </div>`).join('')}</div>
+      <div class="kv" style="margin-top:9px">
+        <span class="pill">Ordered → Sent: <b style="color:var(--text-primary)">${fmt(a.ord-a.sent)}</b> never dispatched</span>
+        <span class="pill">Sent → Received: <b style="color:var(--text-primary)">${fmt(a.sent-a.recd)}</b> not booked in</span></div>`;
+    host.appendChild(d);
+    return;
+  }
+
+  if(fn) fn.innerHTML = `Limited to internal orders that reached a terminal status (closed / received / force_closed) so the received leg is comparable — orders still <i>confirmed</i> or <i>sent</i> simply have not been booked in yet and would read as a false loss. Sent → Received is quantity that left the warehouse but was never GRN'd at the pod.`;
   act().forEach(c=>{
     const a=dayCity(c,cat); const max=a.tord||1;
     const steps=[['Ordered',a.tord,'var(--seq-2)','var(--text-primary)'],
@@ -622,13 +846,20 @@ function renderFunnel(){
 }
 
 /* ---------- wiring ---------- */
-function renderAll(){ renderTiles(); renderCatCards(); renderTrend(); renderPatterns();
-  renderPods(); renderItems(); renderFunnel(); }
+function renderAll(){
+  // the cross-store comparisons have no meaning once a single store is picked
+  const hide = oneStore() ? 'none' : '';
+  const sp=document.getElementById('secPatterns'), sd=document.getElementById('secPods');
+  if(sp) sp.style.display=hide;
+  if(sd) sd.style.display=hide;
+  renderTiles(); renderCatCards(); renderTrend(); renderPatterns();
+  renderPods(); renderItems(); renderFunnel();
+}
 const press=(id,on)=>document.getElementById(id).setAttribute('aria-pressed',on?'true':'false');
 document.getElementById('cityBLR').onclick=()=>{ if(cities.BLR&&!cities.NCR)return;
-  cities.BLR=!cities.BLR; press('cityBLR',cities.BLR); selPod=null; renderAll(); };
+  cities.BLR=!cities.BLR; press('cityBLR',cities.BLR); selPod=null; refreshStoreOptions(); renderAll(); };
 document.getElementById('cityNCR').onclick=()=>{ if(cities.NCR&&!cities.BLR)return;
-  cities.NCR=!cities.NCR; press('cityNCR',cities.NCR); selPod=null; renderAll(); };
+  cities.NCR=!cities.NCR; press('cityNCR',cities.NCR); selPod=null; refreshStoreOptions(); renderAll(); };
 document.getElementById('podSortShort').onclick=()=>{podSort='short';press('podSortShort',1);press('podSortFill',0);renderPods();};
 document.getElementById('podSortFill').onclick=()=>{podSort='fill';press('podSortShort',0);press('podSortFill',1);renderPods();};
 ['fltAll','fltShort','fltUneven','fltZero'].forEach((id,k)=>document.getElementById(id).onclick=()=>{
